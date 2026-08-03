@@ -11,9 +11,9 @@ echo.
 
 :: === 1) PITAJ ZA OPIS IZMENE ===
 set /p COMMIT_MSG="   Opis izmene (Enter za auto): "
-if "!COMMIT_MSG!"=="" (
-    for /f %%I in ('powershell -Command "Get-Date -Format 'yyyy-MM-dd HH:mm'"') do set COMMIT_MSG=Update %%I
-)
+if not "!COMMIT_MSG!"=="" goto :skip_date
+for /f %%I in ('powershell -Command "Get-Date -Format yyyy-MM-dd"') do set COMMIT_MSG=Update %%I
+:skip_date
 
 :: === 2) DODAJ SVE ===
 echo.
