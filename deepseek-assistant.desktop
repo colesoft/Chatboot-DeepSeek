@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=DeepSeek Code Assistant
+Comment=AI-powered code assistant by Cole_Soft
+Exec=bash -c "cd %k && python3 deepseek_chatbot.py"
+Icon=deepseek.png
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+StartupNotify=true

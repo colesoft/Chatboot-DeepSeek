@@ -1,0 +1,173 @@
+# 🤖 DeepSeek Code Assistant
+
+> **🇷🇸 Pametni AI asistent za tvoj programerski projekat**  
+> **🇬🇧 Smart AI assistant for your coding project**  
+> **🇨🇳 智能AI编程助手，助力你的项目开发**
+
+[![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python)](https://python.org)
+[![PyQt5](https://img.shields.io/badge/PyQt5-5.15%2B-green?logo=qt)](https://pypi.org/project/PyQt5/)
+[![License](https://img.shields.io/badge/License-MIT-red.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey?logo=windows)](#)
+[![DeepSeek](https://img.shields.io/badge/Powered%20by-DeepSeek-4A90D9?logo=deepseek)](https://deepseek.com)
+
+---
+
+## 🇷🇸 Srpski
+
+### 📖 Opis
+**DeepSeek Code Assistant** je desktop aplikacija koja koristi **DeepSeek AI** za čitanje, kreiranje i izmenu fajlova u tvom programerskom projektu. Dovoljno je da napišeš šta treba uraditi, a AI će to uraditi umesto tebe!
+
+### ✨ Mogućnosti
+- 📂 **Čitanje fajlova** — bilo koje ekstenzije (.cpp, .h, .py, .php, .html...)
+- 📄 **Kreiranje fajlova** — uz tvoju potvrdu ili automatski
+- ✏️ **Izmena fajlova** — sa diff prikazom promena
+- 🔍 **Pretraga teksta** — kroz ceo projekat
+- ⚡ **Run komande** — build, git, pa i `del` ako zatražiš
+- 🛡️ **Auto-apply** — automatsko odobravanje (sa limitom)
+- ⛔ **STOP dugme** — prekida AI petlju u svakom trenutku
+- 🌐 **Višejezični interfejs** — 🇷🇸 🇬🇧 🇨🇳
+- 📜 **History** — automatsko čuvanje i učitavanje sesija
+- ⚙️ **Podešavanja** — prilagodi sve parametre kroz UI
+
+### 🚀 Pokretanje
+```bash
+pip install PyQt5
+python deepseek_chatbot.py
+```
+
+---
+
+## 🇬🇧 English
+
+### 📖 Description
+**DeepSeek Code Assistant** is a desktop application powered by **DeepSeek AI** that reads, creates, and edits files in your programming project. Just describe what needs to be done, and the AI will do it for you!
+
+### ✨ Features
+- 📂 **Read files** — any extension (.cpp, .h, .py, .php, .html...)
+- 📄 **Create files** — with confirmation or auto-apply mode
+- ✏️ **Edit files** — with diff preview
+- 🔍 **Search text** — across the entire project
+- ⚡ **Run commands** — build, git, or even `del` if you ask
+- 🛡️ **Auto-apply** — automatic approval (with limits)
+- ⛔ **STOP button** — breaks AI loop at any moment
+- 🌐 **Multilingual UI** — 🇷🇸 🇬🇧 🇨🇳
+- 📜 **History** — automatic session saving and loading
+- ⚙️ **Settings** — customize all parameters via UI
+
+### 🚀 How to run
+```bash
+pip install PyQt5
+python deepseek_chatbot.py
+```
+
+---
+
+## 🇨🇳 中文
+
+### 📖 简介
+**DeepSeek Code Assistant** 是一款由 **DeepSeek AI** 驱动的桌面应用程序，可以读取、创建和编辑你的编程项目文件。只需描述需求，AI 就会帮你完成！
+
+### ✨ 功能特点
+- 📂 **读取文件** — 支持任何扩展名（.cpp、.h、.py、.php、.html...）
+- 📄 **创建文件** — 手动确认或自动模式
+- ✏️ **编辑文件** — 带差异预览
+- 🔍 **搜索文本** — 在整个项目中搜索
+- ⚡ **运行命令** — 构建、git 或 `del` 等
+- 🛡️ **自动应用** — 自动批准（有限制）
+- ⛔ **停止按钮** — 随时中断 AI 循环
+- 🌐 **多语言界面** — 🇷🇸 🇬🇧 🇨🇳
+- 📜 **历史记录** — 自动保存和加载会话
+- ⚙️ **设置** — 通过界面自定义所有参数
+
+### 🚀 运行方式
+```bash
+pip install PyQt5
+python deepseek_chatbot.py
+```
+
+---
+
+## 🛡️ Loop Protection / 循环保护
+
+| Level | 🇷🇸 Srpski | 🇬🇧 English | 🇨🇳 中文 |
+|:------|:-----------|:------------|:--------|
+| 1 | Pattern detekcija | Pattern detection | 模式检测 |
+| 2 | Create→Del→Create | Create→Del→Create | 创建→删除→创建 |
+| 3 | Max tool calls | Max tool calls | 最大工具调用数 |
+| 4 | Max fajlova (auto-apply) | Max files (auto-apply) | 最大文件数 |
+| 5 | ⛔ STOP dugme | ⛔ STOP button | ⛔ 停止按钮 |
+
+All limits are adjustable in ⚙️ Settings / 所有限制可在 ⚙️ 设置中调整
+
+---
+
+## ⚙️ Settings / 设置
+
+| Parameter 🇷🇸 | Parameter 🇬🇧 | Default | Options |
+|:--------------|:--------------|:--------|:--------|
+| Max alata po poruci | Max tool calls | 50 | 20 – 1000 |
+| Max fajlova (auto-apply) | Max files | 10 | 5 – 10000 |
+| Tokeni pre kompresije | Tokens before compression | 8000 | 1K – 50K |
+| Maks context | Max context | 800000 | 100K – 1M |
+| Max sesija u istoriji | Max history sessions | 50 | 10 – 100 |
+| Poruka posle kompresije | Messages after compression | 10 | 5 – 30 |
+| Pattern detekcija | Pattern detection | 50 | 0 – 10000 |
+
+---
+
+## 🔧 Tech / 技术
+
+- **Language:** Python 3.8+
+- **GUI:** PyQt5
+- **API:** DeepSeek Chat (function calling)
+- **Platform:** Windows 10/11
+
+### Project structure / 项目结构
+```
+├── main.py                  # Entry point (splash + pokretanje) / 入口点
+├── deepseek_chatbot.py      # ChatWindow (glavni prozor) / 主窗口
+├── chatbot_app/             # Refaktorisani moduli / 模块
+│   ├── config.py            # Konfiguracija, putanje, settings / 配置
+│   ├── i18n.py              # Prevodi (sr/en/zh), SYSTEM_PROMPT / 翻译
+│   ├── utils.py             # Helper funkcije / 工具函数
+│   ├── tools.py             # ToolExecutor + alati / 工具执行器
+│   ├── api_client.py        # DeepSeek API logika / API 逻辑
+│   ├── widgets.py           # DiffDialog i widgeti / 对话框
+│   ├── history.py           # HistoryMixin (sesije) / 历史记录
+│   └── ui/
+│       ├── dialogs.py       # DialogsMixin (Settings, Models...) / 对话框
+│       ├── project_context.py # ProjectContextMixin / 项目上下文
+│       └── theme.py         # QSS stilovi / 样式
+├── deepseek.ico              # Icon / 图标
+├── requirements.txt          # Dependencies / 依赖
+├── run.bat                   # Windows launcher / 启动器
+├── install_deps.bat          # Install dependencies / 安装依赖
+├── installer_script.iss      # Inno Setup script
+├── README.md                 # This file / 本文件
+├── .gitignore
+└── LICENSE
+```
+
+### 🚀 Pokretanje
+```bash
+python main.py                # Preporučeno (splash screen + sve)
+python deepseek_chatbot.py    # Isto radi (kompatibilnost sa starom komandom)
+```
+
+---
+
+## 👨‍💻 Author / 作者 / Autor
+
+**Cole_Soft** — Kruševac, Serbia 🇷🇸  
+🌐 [www.colesoft.net](https://www.colesoft.net)
+
+> ❤️ 🇷🇸 Napravljeno sa ljubavlju prema Kini, srpskom narodu i celom svetu!  
+> ❤️ 🇬🇧 Made with love for China, the Serbian people, and the whole world!  
+> ❤️ 🇨🇳 满怀对中国的热爱、对塞尔维亚人民的热爱、对全世界的热爱而制作！  
+> 深圳 · 中国 · 世界
+
+---
+
+## 📜 License / 许可证 / Licenca
+
+MIT License — free to use, modify, and share! 🎉

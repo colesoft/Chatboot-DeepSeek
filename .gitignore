@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Settings (licni podaci)
+api_key.txt
+project_path.txt
+opacity.txt
+language.txt
+settings.json
+models.json
+
+# History (licni podaci - svaki projekat ima svoj)
+deepseek_history.json
+deepseek_history.json.*
+session_backup.json
+
+# Context (licni podaci - svaki projekat ima svoj)
+.deepseek_context.txt
+.deepseek_context.txt.bak
+
+# Windows
+*.bak
+thumbs.db
+*.log
+
+# IDE
+.vscode/
+.idea/
+.qtcreator/
+*.swp
+*.swo
+
+# PyInstaller
+*.exe
+
+# Generisana ikona u chatbot_app (kreira je get_deepseek_icon)
+chatbot_app/deepseek.ico
+chatbot_app/deepseek.png
+
+# Ostali generisani/privremeni
+*.jfif
+zagit/
