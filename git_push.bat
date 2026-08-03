@@ -12,8 +12,7 @@ echo.
 :: === 1) PITAJ ZA OPIS IZMENE ===
 set /p COMMIT_MSG="   Opis izmene (Enter za auto): "
 if "!COMMIT_MSG!"=="" (
-    for /f "tokens=2 delims==" %%I in ('wmic os get localdatetime /value ^| find "="') do set DT=%%I
-    set COMMIT_MSG=Update !DT:~8,2!.!DT:~5,2!.!DT:~0,4! - !DT:~2,2!:!DT:~4,2!
+    for /f %%I in ('powershell -Command "Get-Date -Format 'yyyy-MM-dd HH:mm'"') do set COMMIT_MSG=Update %%I
 )
 
 :: === 2) DODAJ SVE ===
@@ -32,10 +31,14 @@ echo.
 
 :: === 4) COMMIT ===
 echo   ✏️  Commit: "!COMMIT_MSG!"
-git commit -m "!COMMIT_MSG!" 2>nul
+git commit -m "!COMMIT_MSG!"
 if errorlevel 1 (
     :: Ako nema promena, commit ne uspe - to je OK
     echo   ℹ️  Nema izmena za commit (ili nista novo).
+    echo.
+    echo   ✅ Sve je vec na GitHub-u!
+    pause
+    exit /b 0
 ) else (
     echo   ✅ Commit uspeo!
 )
