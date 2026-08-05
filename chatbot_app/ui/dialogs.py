@@ -3,6 +3,7 @@
 import json
 from PyQt5.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QInputDialog, QPushButton, QMessageBox, QTextEdit, QTabWidget, QFormLayout, QComboBox, QFrame, QWidget)
 from PyQt5.QtCore import Qt, QUrl, QTimer, QEventLoop
+from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 from ..config import (get_data_file, load_settings, save_settings, load_models_config, save_models_config, MAX_TOOL_CALLS, MAX_FILES_PER_SESSION, MAX_HISTORY_TOKENS, MAX_CONTEXT_TOKENS, MAX_SESSION_HISTORY, KEEP_MESSAGES_ON_SUMMARY, PATTERN_DETECT_LIMIT, STREAMING_ENABLED, TEMPERATURE, TOP_P, DEEPSEEK_MODELS, DEFAULT_MODEL, DEEPSEEK_LIST_MODELS_URL, FALLBACK_MODELS)
 from ..i18n import ABOUT_TEXT
@@ -19,19 +20,103 @@ class DialogsMixin:
             QTimer.singleShot(200, self._ask_for_api_key)
             return
         try:
-            key, ok = QInputDialog.getText(
-                self, "DeepSeek API Ključ",
-                "Unesi svoj DeepSeek API ključ:",
-                QLineEdit.Password,
-                self.api_key if self.api_key else ""
+            dlg = QDialog(self)
+            dlg.setWindowTitle("🔑 DeepSeek API Ključ")
+            dlg.setWindowIcon(get_deepseek_icon())
+            dlg.setFixedSize(520, 430)
+            dlg.setStyleSheet("QDialog { background: #1a1a2e; }")
+
+            layout = QVBoxLayout(dlg)
+            layout.setContentsMargins(20, 18, 20, 16)
+            layout.setSpacing(10)
+
+            # ---- Naslov ----
+            title = QLabel("🔑 <b>DeepSeek API Ključ</b>")
+            title.setStyleSheet("color: #e94560; font-size: 15px; background: transparent;")
+            layout.addWidget(title)
+
+            # ---- Uputstvo ----
+            info = QLabel(
+                '<div style="color: #e0e0e0; font-size: 12px; line-height: 1.5;">'
+                '<span style="color: #8899bb; font-weight: bold;">Kako do DeepSeek API ključa:</span><br>'
+                '1. Idi na <span style="color: #4fc3f7;">platform.deepseek.com</span><br>'
+                '2. Registruj se (<span style="color: #66bb6a; font-weight: bold;">besplatno</span>)<br>'
+                '3. Napravi API ključ<br>'
+                '4. Dobijaš <span style="color: #ffd54f; font-weight: bold;">5.000.000 besplatnih tokena</span> za test<br>'
+                '5. Unesi ključ ovde i počni sa radom!<br><br>'
+                '<span style="color: #8899bb;">Vaš chatbot je optimizovan isključivo za DeepSeek.</span>'
+                '</div>'
             )
-            if ok and key:
-                self.api_key = key.strip()
-                with open(get_data_file("api_key.txt"), "w") as f:
-                    f.write(self.api_key)
-                self.status_label.setText(self._tr("status_saved"))
-            elif ok:
-                self._show_error_msg(self._tr("key_empty"))
+            info.setTextFormat(Qt.RichText)
+            info.setWordWrap(True)
+            info.setStyleSheet("background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 12px;")
+            layout.addWidget(info)
+
+            # ---- Dugme za registraciju (otvara browser) ----
+            btn_register = QPushButton("🌐 Registruj se na platform.deepseek.com")
+            btn_register.setStyleSheet(
+                "QPushButton { background: #0f3460; color: #4fc3f7; border: 1px solid #4fc3f7; "
+                "border-radius: 6px; padding: 10px; font-size: 12px; font-weight: bold; }"
+                "QPushButton:hover { background: #1a4a7a; color: #ffffff; }"
+            )
+            btn_register.setCursor(Qt.PointingHandCursor)
+            btn_register.clicked.connect(
+                lambda: QDesktopServices.openUrl(QUrl("https://platform.deepseek.com"))
+            )
+            layout.addWidget(btn_register)
+
+            # ---- Unos ključa ----
+            lbl_key = QLabel("🔑 Unesi svoj DeepSeek API ključ:")
+            lbl_key.setStyleSheet("color: #ccc; font-size: 12px; background: transparent;")
+            layout.addWidget(lbl_key)
+
+            self._api_key_edit = QLineEdit()
+            self._api_key_edit.setEchoMode(QLineEdit.Password)
+            self._api_key_edit.setPlaceholderText("sk-...")
+            if self.api_key:
+                self._api_key_edit.setText(self.api_key)
+            self._api_key_edit.setStyleSheet(
+                "QLineEdit { background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; "
+                "border-radius: 6px; padding: 8px; font-size: 13px; }"
+                "QLineEdit:focus { border: 1px solid #e94560; }"
+            )
+            layout.addWidget(self._api_key_edit)
+
+            # ---- Dugmad OK / Cancel ----
+            bf = QHBoxLayout()
+            bf.addStretch()
+            btn_cancel = QPushButton("Odustani")
+            btn_cancel.setStyleSheet(
+                "QPushButton { background: transparent; color: #888; border: 1px solid #444; "
+                "border-radius: 6px; padding: 8px 20px; font-size: 12px; }"
+                "QPushButton:hover { color: #fff; border-color: #888; }"
+            )
+            btn_cancel.clicked.connect(dlg.reject)
+            bf.addWidget(btn_cancel)
+            btn_ok = QPushButton("✅ Sačuvaj ključ")
+            btn_ok.setStyleSheet(
+                "QPushButton { background: #e94560; color: white; border: none; border-radius: 6px; "
+                "padding: 8px 20px; font-size: 12px; font-weight: bold; }"
+                "QPushButton:hover { background: #ff6b6b; }"
+            )
+            btn_ok.setDefault(True)
+            btn_ok.clicked.connect(dlg.accept)
+            bf.addWidget(btn_ok)
+            layout.addLayout(bf)
+
+            QTimer.singleShot(10, lambda: self._center_dialog(dlg, 520, 430))
+            if dlg.exec_() == QDialog.Accepted:
+                key = self._api_key_edit.text().strip()
+                if key:
+                    self.api_key = key
+                    with open(get_data_file("api_key.txt"), "w") as f:
+                        f.write(self.api_key)
+                    self.status_label.setText(self._tr("status_saved"))
+                    # 🔄 Učitaj modele i balans nakon unosa ključa
+                    QTimer.singleShot(500, self.fetch_models_from_api)
+                    QTimer.singleShot(1000, self.fetch_user_balance)
+                else:
+                    self._show_error_msg(self._tr("key_empty"))
         except Exception as e:
             print(f"[DeepSeek] Greška pri unosu API ključa: {e}")
 

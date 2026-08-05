@@ -94,6 +94,7 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         self._loop_active = False
         self._stop_requested = False  # ⛔ STOP flag
+        self._summarize_retry_count = 0  # 🛑 Brojač sažimanja (context limit petlja)
         self._tool_call_count = 0     # Brojač tool callova u petlji
         self._max_tool_calls = MAX_TOOL_CALLS  # Iz settings.json
         self._last_tool_names = []    # 🔄 Poslednjih 7 imena alata za detekciju petlje
@@ -1007,6 +1008,7 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         self._last_tool_names = []     # Reset praćenja patterna
         self._recreated_files = set()  # Reset praćenja fajlova
         self._retry_length_count = 0   # Reset retry brojača za finish_reason="length"
+        self._summarize_retry_count = 0  # 🛑 Reset brojača sažimanja (context limit petlja)
 
         self._loop_active = True
         self._update_send_button(is_running=True)
@@ -1094,7 +1096,47 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         merged_system["content"] = original_content + session_summary
         
         self.messages = [merged_system]
-        self.messages.extend(recent)
+        
+        # ⚠️ VAŽNO #3: SKRATI sadržaj svake sačuvane poruke!
+        # Problem: poslednjih 10 poruka mogu biti ogromne (tool rezultati sa celim
+        # fajlovima, dugi AI odgovori) - i dalje prelaze context limit, pa API
+        # vraća 400 u BESKONAČNOJ PETLJI.
+        # Rešenje: skrati svaku poruku na razumnu dužinu.
+        # ⚠️ KRITIČNO: pravimo KOPIJE poruka! Ako menjamo originalne poruke
+        # (koje su reference u self.messages), sažeti razgovor se zauvek skrati
+        # i u history fajlu - korisnik vidi "XXXX... [skraćeno]" umesto pravog teksta!
+        MAX_MSG_CHARS = {
+            "user": 2000,       # korisničke poruke su obično kratke
+            "assistant": 3000,  # AI odgovor - zadrži suštinu
+            "tool": 500,        # tool rezultati - samo prvi deo (bio je ogroman!)
+            "system": 4000,     # system prompt (sažetak) - ograniči
+        }
+        recent_copies = []
+        for msg in recent:
+            # 📋 Napravi KOPIJU - original u self.messages/history ostaje netaknut!
+            msg_copy = dict(msg)
+            role = msg_copy.get("role", "")
+            content = msg_copy.get("content", "")
+            if isinstance(content, str):
+                limit = MAX_MSG_CHARS.get(role, 2000)
+                if len(content) > limit:
+                    msg_copy["content"] = content[:limit] + f"\n... [skraćeno sa {len(content)} na {limit} chars]"
+            recent_copies.append(msg_copy)
+        
+        self.messages.extend(recent_copies)
+        
+        # ⚠️ VAŽNO #4: Ako i posle skraćivanja i dalje prelazi limit,
+        # obriši tool poruke (najveće su - sadrže cele fajlove).
+        # Tool poruke nisu kritične za nastavak razgovora.
+        total_after = count_context_tokens(self.messages)
+        if total_after > MAX_HISTORY_TOKENS * 2:  # sigurnosna granica
+            log(f"⚠️ Nakon skraćivanja i dalje {total_after} tokena - brišem tool poruke")
+            self.messages = [m for m in self.messages if m.get("role") != "tool"]
+            # Proveri ponovo - ako i dalje prelazi, smanji broj poruka na 5
+            total_after2 = count_context_tokens(self.messages)
+            if total_after2 > MAX_HISTORY_TOKENS * 2 and len(self.messages) > 3:
+                log(f"⚠️ I dalje {total_after2} tokena - ostavljam samo poslednjih 5 poruka")
+                self.messages = [self.messages[0]] + self.messages[-5:]
         
         self._append_system_message(
             f"🔄 <b>History sažet:</b> {total_tokens:,} tokena → {len(recent)} poslednjih poruka sačuvano. "
@@ -1722,6 +1764,15 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             self.status_label.setText("⏳ Razmišljam...")
 
         msgs = messages_override if messages_override else self.messages
+        # ⚠️ Pre slanja proveri procenu tokena - ako je blizu limita, sažmi ODMAH
+        # (ne čekaj API 400 grešku - to je stvaralo beskonačnu petlju!)
+        est = count_context_tokens(msgs)
+        if est > MAX_HISTORY_TOKENS:
+            log(f"⚠️ _call_api: procena {est} tokena > limit {MAX_HISTORY_TOKENS} - sažimam pre slanja")
+            self._summarize_history()
+            msgs = self.messages
+            est = count_context_tokens(msgs)
+            log(f"⚠️ _call_api: posle sažimanja {est} tokena")
         # Validiraj i popravi poruke pre slanja API-ju
         msgs = validate_and_fix_messages(msgs)
 
@@ -1952,6 +2003,24 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
                 pass  # Već prikazano u chatu
             else:
                 if "context length" in error_detail.lower() or "context" in error_detail.lower():
+                    # 🛑 ZAUSTAVI BESKONAČNU PETLJU: ako sažimanje ne reši problem
+                    # posle 3 pokušaja, prekini - ne zovi API u krug!
+                    self._summarize_retry_count = getattr(self, "_summarize_retry_count", 0) + 1
+                    if self._summarize_retry_count > 3:
+                        log(f"🛑 Context limit petlja prekinuta nakon {self._summarize_retry_count} pokušaja!")
+                        self._append_message("error",
+                            f"⛔ <b>Context limit prekoračen i sažimanje ne pomaže</b> "
+                            f"({self._summarize_retry_count} pokušaja). "
+                            f"Fajlovi/poruke su preveliki. Pritisni 🗑️ New da počneš novi razgovor.")
+                        self._show_error_msg("Context limit - sažimanje ne pomaže. Pritisni 'New' za novi razgovor.")
+                        self.status_label.setText("⛔ Context limit - petlja prekinuta")
+                        self._stop_thinking_animation()
+                        self._update_send_button(is_running=False)
+                        self._set_ui_enabled(True)
+                        self._loop_active = False
+                        self.input_field.setFocus()
+                        return
+                    
                     self._show_error_msg("Context limit prekoračen! Automatski sažimam history...")
                     # Automatski sažmi history i pokušaj ponovo
                     if self._summarize_history():
@@ -2111,8 +2180,15 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             return
 
         # 🔄 Detekcija ponavljajućeg obrasca (petlje)
+        # ⚠️ Loop zaštita se odnosi SAMO na operacije koje menjaju stanje:
+        # create_file / edit_file / run_command (del/rm = brisanje).
+        # Čitanje (read_file, list_files, search_text, read_log, get_issues)
+        # se NE prati - AI mora slobodno da čita fajlove bez lažne petlje.
+        WRITE_TOOLS = {"create_file", "edit_file", "run_command"}
         for tc in tool_calls:
-            self._last_tool_names.append(tc["function"]["name"])
+            name = tc["function"]["name"]
+            if name in WRITE_TOOLS:
+                self._last_tool_names.append(name)
         # Čuvaj samo poslednjih 7
         if len(self._last_tool_names) > 7:
             self._last_tool_names = self._last_tool_names[-7:]

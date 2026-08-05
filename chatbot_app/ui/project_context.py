@@ -10,6 +10,11 @@ from ..logger import log
 class ProjectContextMixin:
     """Kontekst projekta i izbor foldera."""
 
+    # ⏱️ Debounce: čuvaj na disk max jednom u 2 sekunde (sprečava sporost
+    # kad AI pozove 20 alata u petlji - svaki bi pisao fajl!)
+    _ctx_save_timer = None
+    _ctx_save_pending = False
+
     def _get_project_context_path(self):
         """Vraća putanju do fajla sa kontekstom projekta.
         ✅ Namerno u PROJECT folderu - svaki projekat ima svoj kontekst,
@@ -30,41 +35,65 @@ class ProjectContextMixin:
             self.project_context = ""
     
     def _save_project_context(self, text):
-        """Dodaje tekst u kontekst projekta."""
-        if text:
-            if self.project_context:
-                self.project_context += "\n" + text
-            else:
-                self.project_context = text
-            
-            # ⚠️ Ograniči kontekst na ~30KB (inače će narasti ogromno
-            # i usporiti/preskupiti svaki API poziv jer ide u system prompt).
-            # Zadržavamo POSLEDNJIH 30KB (najnoviji rad).
-            MAX_CONTEXT_CHARS = 30000
-            if len(self.project_context) > MAX_CONTEXT_CHARS:
-                self.project_context = self.project_context[-MAX_CONTEXT_CHARS:]
-                # Obeleži da je kontekst skraćen
-                marker = f"\n[Kontekst je skraćen na poslednjih {MAX_CONTEXT_CHARS} karaktera - stariji rad je u history fajlu]"
-                self.project_context = marker + self.project_context
-            
-            # 🧹 AUTO-KOMPAKTIZACIJA: ako je previše unosa, sažmi najstarije
-            # da fajl ne naraste beskonačno sa sirovim razgovorima.
-            self._compact_project_context()
-            
-            ctx_path = self._get_project_context_path()
-            try:
-                with open(ctx_path, "w", encoding="utf-8") as f:
-                    f.write(self.project_context)
-                print(f"[DeepSeek] Sačuvan kontekst projekta ({len(self.project_context)} chars)")
-            except Exception as e:
-                print(f"[DeepSeek] Greška pri čuvanju konteksta: {e}")
+        """Dodaje tekst u kontekst projekta.
+        ⚠️ Debounce: menja memoriju odmah, ali piše na disk max 1x/2s."""
+        if not text:
+            return
+        if self.project_context:
+            self.project_context += "\n" + text
+        else:
+            self.project_context = text
+        
+        # ⚠️ Ograniči kontekst na ~30KB (inače će narasti ogromno
+        # i usporiti/preskupiti svaki API poziv jer ide u system prompt).
+        # Zadržavamo POSLEDNJIH 30KB (najnoviji rad).
+        MAX_CONTEXT_CHARS = 30000
+        if len(self.project_context) > MAX_CONTEXT_CHARS:
+            self.project_context = self.project_context[-MAX_CONTEXT_CHARS:]
+            # Obeleži da je kontekst skraćen
+            marker = f"\n[Kontekst je skraćen na poslednjih {MAX_CONTEXT_CHARS} karaktera - stariji rad je u history fajlu]"
+            self.project_context = marker + self.project_context
+        
+        # 🧹 AUTO-KOMPAKTIZACIJA u memoriji (bez čekanja diska)
+        self._compact_project_context()
+        
+        # ⏱️ Debounce pisanje na disk - ako već čekamo, samo obeleži
+        if self._ctx_save_pending:
+            return
+        self._ctx_save_pending = True
+        
+        # Iskoristi QTimer za odloženo pisanje (import na vrhu)
+        try:
+            from PyQt5.QtCore import QTimer
+            if self._ctx_save_timer is None:
+                self._ctx_save_timer = QTimer()
+                self._ctx_save_timer.setSingleShot(True)
+                self._ctx_save_timer.timeout.connect(self._flush_project_context)
+            self._ctx_save_timer.start(2000)  # 2 sekunde
+        except Exception:
+            # Fallback: piši odmah ako QTimer nije dostupan
+            self._flush_project_context()
+    
+    def _flush_project_context(self):
+        """Stvarno piše kontekst na disk (poziva ga QTimer debounce)."""
+        self._ctx_save_pending = False
+        ctx_path = self._get_project_context_path()
+        try:
+            with open(ctx_path, "w", encoding="utf-8") as f:
+                f.write(self.project_context)
+            print(f"[DeepSeek] Sačuvan kontekst projekta ({len(self.project_context)} chars)")
+        except Exception as e:
+            print(f"[DeepSeek] Greška pri čuvanju konteksta: {e}")
 
-    def _compact_project_context(self, max_entries=150, keep_recent=60):
+    def _compact_project_context(self, max_entries=300, keep_recent=40):
         """Sažima najstarije unose konteksta da fajl ne raste beskonačno.
 
         Kada broj unosa pređe max_entries:
         - Najstariji unosi se sažmu u JEDAN unos "📋 SAŽETAK STAROG KONTEKSTA"
         - Zadržavaju se poslednjih keep_recent sirovih unosa (najnoviji rad)
+
+        ⚠️ VAŽNO: rezultat kompaktizacije MORA biti ispod max_entries!
+        (keep_recent + max 100 sažetih ≈ 140 < 300) - inače se vrti u petlji.
         """
         try:
             lines = [l.strip() for l in self.project_context.split("\n") if l.strip()]

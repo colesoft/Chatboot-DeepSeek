@@ -273,8 +273,9 @@ class HistoryMixin:
         load_btn.clicked.connect(_load_sel)
         btn_layout.addWidget(load_btn)
 
-        def _double_click(idx):
-            item = list_widget.item(idx)
+        def _double_click(index):
+            # ⚠️ PyQt5 doubleClicked šalje QModelIndex, ne int!
+            item = list_widget.item(index.row())
             if item and item.data(Qt.UserRole):
                 self._load_session_data(item.data(Qt.UserRole))
                 dlg.accept()
