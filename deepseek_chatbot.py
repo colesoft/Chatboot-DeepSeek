@@ -22,6 +22,7 @@ import shutil
 import glob
 import subprocess
 import traceback
+import time
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
@@ -66,7 +67,7 @@ from chatbot_app.tools import TOOLS_DEFINITIONS, ToolExecutor
 from chatbot_app.widgets import DiffDialog
 from chatbot_app.api_client import validate_and_fix_messages
 from chatbot_app.pricing import (
-    estimate_cost, format_usd, is_off_peak, peak_window_text,
+    estimate_cost, format_cny, is_off_peak,
     get_max_tokens, cache_savings_pct,
 )
 from chatbot_app.history import HistoryMixin
@@ -97,6 +98,9 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         self.current_lang = load_language()
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         self._loop_active = False
+        # ⛔ Zajednički API gate - sprečava paralelne zahteve (API dozvoljava samo 1 istovremeno)
+        self._api_gate_busy = False
+        self._api_gate_stamp = 0.0
         self._stop_requested = False  # ⛔ STOP flag
         self._summarize_retry_count = 0  # 🛑 Brojač sažimanja (context limit petlja)
         self._tool_call_count = 0     # Brojač tool callova u petlji
@@ -124,6 +128,7 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         self._thinking_timer = None
         self._thinking_frames = 0
         self._balance_info = self._load_cached_balance()  # Učitaj keširani balans
+        self._status_full_text = None  # 📏 Puni tekst statusa (za elidiranje pri resize)
         # 💰 Praćenje troškova sesije (pricing.py)
         self._session_cost = 0.0        # Ukupna cena ove sesije (USD)
         self._session_requests = 0      # Broj API zahteva u sesiji
@@ -156,8 +161,7 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         if self.api_key:
             # Prikaži keširani balans odmah
             if self._balance_info and self._balance_info.get("total_balance") != "?":
-                bal = self._balance_info
-                self.status_label.setText(f"💰 Balans: {bal['total_balance']} {bal['currency']}")
+                self._show_balance_status(self._balance_info)
             QTimer.singleShot(1500, self.fetch_models_from_api)
             QTimer.singleShot(3000, self.fetch_user_balance)
 
@@ -218,6 +222,8 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         self.input_field.setPlaceholderText(t("placeholder"))
         self.lbl_hint.setText(t("hint"))
         self.status_label.setText(t("status_ready"))
+        # Osveži i indikator cene/špica da prati novi jezik
+        self._update_pricing_display()
         # Osveži welcome ako je prazan chat
         if self._loop_active == False and len(self.messages) <= 1:
             self._show_welcome()
@@ -565,8 +571,8 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
 
         # 💲 Dugme "Proveri cene" - otvara zvaničnu stranicu sa cenama
         self.btn_pricing = QPushButton("💲")
-        self.btn_pricing.setToolTip("Otvori zvanične cene (api-docs.deepseek.com)\n"
-                                    "Špic: 01–04h i 06–10h UTC (2x cena) | Van špica: −50%")
+        self.btn_pricing.setToolTip(self._tr("pricing_open_official") + "\n" +
+                                    self._tr("pricing_peak_hours_hint"))
         self.btn_pricing.setFixedWidth(36)
         self.btn_pricing.clicked.connect(self._open_pricing_page)
         self.btn_pricing.setStyleSheet("""
@@ -625,18 +631,35 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
 
         # ---- Status bar ----
         status_frame = QFrame()
+        self.status_frame = status_frame
         status_frame.setStyleSheet("QFrame { background-color: #1a1a2e; border-top: 1px solid #0f3460; }")
         status_layout = QHBoxLayout(status_frame)
         status_layout.setContentsMargins(12, 4, 12, 4)
 
         self.status_label = QLabel("✅ Spreman")
         self.status_label.setStyleSheet("color: #888; font-size: 11px; background: transparent;")
-        status_layout.addWidget(self.status_label)
+        # 📏 Dozvoli labeli da se širi/skuplja (elidiranje u resizeEvent)
+        self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.status_label.setMinimumWidth(100)
+        # 📏 Pratimo svaki setText kako bi resizeEvent znao šta da elidira
+        self._setting_balance_status = False
+        _orig_status_setText = self.status_label.setText
+        def _tracked_status_text(text):
+            _orig_status_setText(text)
+            if not self._setting_balance_status:
+                self._status_full_text = str(text)
+        self.status_label.setText = _tracked_status_text
+        status_layout.addWidget(self.status_label, stretch=1)
 
-        # ⏰ Indikator špic/van špica + cena poslednjeg zahteva
+        # 💰 Indikator špic/van špica + cena poslednjeg zahteva
+        # Klik na njega → detaljan prikaz troškova sesije (_show_pricing_details)
         self.lbl_pricing = QLabel("")
         self.lbl_pricing.setStyleSheet("color: #7dce94; font-size: 11px; background: transparent;")
-        self.lbl_pricing.setToolTip("Cene: " + peak_window_text())
+        self.lbl_pricing.setToolTip(self._tr("cost_prices_tooltip") +
+                                    self._tr("pricing_peak_window") +
+                                    "\n\n👆💵 " + self._tr("cost_click_details"))
+        self.lbl_pricing.setCursor(Qt.PointingHandCursor)
+        self.lbl_pricing.mousePressEvent = self._show_pricing_details
         status_layout.addWidget(self.lbl_pricing)
 
         status_layout.addStretch()
@@ -919,6 +942,16 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         """Wrapper - logika u chatbot_app.utils.escape_html."""
         return escape_html(text)
 
+    def _append_cost_banner(self):
+        """💸 Osvežava STATUS BAR sa cenom poslednjeg zahteva (NE u chat!).
+
+        Cena / špic / cache se prikazuju u lbl_pricing (status bar, desno).
+        Klik na lbl_pricing → detaljan pregled troškova sesije.
+        """
+        if self._session_requests <= 0 or self._last_request_cost <= 0:
+            return
+        self._update_pricing_display()
+
     def _short_path(self, path, max_len=40):
         """Wrapper - logika u chatbot_app.utils.short_path."""
         return short_path(path, max_len)
@@ -1181,11 +1214,8 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
                 log(f"⚠️ I dalje {total_after2} tokena - ostavljam samo poslednjih 5 poruka")
                 self.messages = [self.messages[0]] + self.messages[-5:]
         
-        self._append_system_message(
-            f"🔄 <b>History sažet:</b> {total_tokens:,} tokena → {len(recent)} poslednjih poruka sačuvano. "
-            f"Stariji deo je sačuvan u history fajlu."
-        )
-        self.status_label.setText(f"🔄 History sažet: {total_tokens:,} → {len(recent)} poruka")
+        # 🔄 Samo STATUS BAR - NE dodajemo u chat prozor (korisnik tražio)
+        self.status_label.setText(f"🔄 History sažet: {total_tokens:,} → {len(recent)} poruka (starije u fajlu)")
         log(f"🔄 _summarize_history() - sazet: {total_tokens:,} → {len(recent)} poruka")
         return True
 
@@ -1518,6 +1548,24 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
     # =========================================================================
     # 🔄 API: Dohvatanje modela sa https://api.deepseek.com/list-models
     # =========================================================================
+    # ⛔ Zajednički API gate (helperi) - sprečava da se dva zahteva šalju istovremeno
+    def _api_gate_try_acquire(self):
+        """Pokušava da zauzme API gate. Vraća True ako je uspešno zauzet."""
+        now = time.time()
+        # Anti-deadlock: ako je gate zauzet duže od 90s (zahtev zaglavio), resetuj ga
+        if self._api_gate_busy and (now - self._api_gate_stamp) > 90:
+            log("⚠️ API gate zauzet >90s - resetujem (anti-deadlock)")
+            self._api_gate_busy = False
+        if not self._api_gate_busy:
+            self._api_gate_busy = True
+            self._api_gate_stamp = now
+            return True
+        return False
+
+    def _api_gate_release(self):
+        """Oslobađa API gate."""
+        self._api_gate_busy = False
+
     def fetch_models_from_api(self):
         """Dohvata listu dostupnih modela sa DeepSeek API-ja."""
         log("🔃 fetch_models_from_api() - krece")
@@ -1525,6 +1573,11 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             return
         if not self.isVisible():
             QTimer.singleShot(200, self.fetch_models_from_api)
+            return
+
+        # ⛔ API gate: ako je chat ili balance zahtev u toku, sačekaj pa probaj ponovo
+        if not self._api_gate_try_acquire():
+            QTimer.singleShot(1500, self.fetch_models_from_api)
             return
         
         try:
@@ -1542,6 +1595,8 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
     
     def _on_models_api_reply(self, reply):
         """Obradjuje odgovor od /models API-ja."""
+        # ⛔ Models zahtev je završen - oslobodi API gate
+        self._api_gate_release()
         try:
             if reply.error() != QNetworkReply.NoError:
                 err_msg = reply.errorString()
@@ -1593,9 +1648,9 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             
             self._apply_models(new_models)
             count = len(new_models)
-            self.status_label.setText(f"✅ Učitano {count} modela sa API-ja")
-            self._append_system_message(
-                f"🔄 <b>Modeli ažurirani sa API-ja:</b> {count} modela "
+            # Poruka o modelima ide u STATUS (ne u chat prozor)
+            self.status_label.setText(
+                f"🔄 Modeli ažurirani sa API-ja: {count} modela "
                 f"(prvi: {new_models[0]['id']})"
             )
             
@@ -1669,6 +1724,11 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         if not self.isVisible():
             QTimer.singleShot(500, self.fetch_user_balance)
             return
+
+        # ⛔ API gate: ako je chat ili models zahtev u toku, sačekaj pa probaj ponovo
+        if not self._api_gate_try_acquire():
+            QTimer.singleShot(1500, self.fetch_user_balance)
+            return
         
         try:
             self.status_label.setText("💰 Dohvatam balans...")
@@ -1685,6 +1745,8 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
     
     def _on_balance_api_reply(self, reply):
         """Obradjuje odgovor od balance API-ja."""
+        # ⛔ Balance zahtev je završen - oslobodi API gate
+        self._api_gate_release()
         try:
             if reply.error() != QNetworkReply.NoError:
                 err_msg = reply.errorString()
@@ -1692,10 +1754,9 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
                 
                 # Ako imamo sačuvan balans, prikaži njega umesto greške
                 if hasattr(self, '_balance_info') and self._balance_info:
-                    bal = self._balance_info
-                    self.status_label.setText(f"💰 Balans: {bal['total_balance']} {bal['currency']}")
+                    self._show_balance_status(self._balance_info)
                 elif status_code == 402:
-                    self._update_balance_display("0.00", "CNY", is_available=False)
+                    self._update_balance_display("0.00", "0.00", "0.00", "CNY", is_available=False)
                     self.status_label.setText("💰 Balans: 0.00 CNY (❌ Nema sredstava)")
                 elif status_code == 401:
                     self.status_label.setText("💰 Balans: ❌ Nevažeći API ključ")
@@ -1706,8 +1767,7 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
                     print(f"[DeepSeek] Greška pri dohvatanju balansa: {err_msg} (HTTP {status_code})")
                     # Sačuvaj balans i prikaži staru vrednost
                     if hasattr(self, '_balance_info') and self._balance_info:
-                        bal = self._balance_info
-                        self.status_label.setText(f"💰 Balans: {bal['total_balance']} {bal['currency']}")
+                        self._show_balance_status(self._balance_info)
                 
                 try:
                     reply.deleteLater()
@@ -1717,26 +1777,58 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             
             data_bytes = reply.readAll().data()
             data = json.loads(data_bytes)
+            log(f"💰 Balans API odgovor: {data_bytes[:250]}")
             
             is_available = data.get("is_available", False)
             balance_infos = data.get("balance_infos", [])
             
             total_balance = "0.00"
+            granted_balance = "0.00"
+            top_up_balance = "0.00"
             currency = "CNY"
             
             if balance_infos and len(balance_infos) > 0:
+                # ⚠️ API vraća VIŠE valuta (npr. USD 0.00 + CNY 23.46) i
+                #    redosled se MENJA od poziva do poziva!
+                #    Zato NE uzimamo balance_infos[0] (zna biti USD 0.00),
+                #    već valutu sa NAJVEĆIM iznosom (preferiramo CNY).
                 info = balance_infos[0]
+                best_total = -1.0
+                for _info in balance_infos:
+                    try:
+                        _t = float(_info.get("total_balance", "0") or 0)
+                    except (ValueError, TypeError):
+                        _t = 0.0
+                    _is_cny = str(_info.get("currency", "")).upper() == "CNY"
+                    if _t > best_total or (_is_cny and _t >= best_total):
+                        best_total = _t
+                        info = _info
                 total_balance = info.get("total_balance", "0.00")
+                granted_balance = info.get("granted_balance", "0.00")
+                # ⚠️ API koristi "topped_up_balance" (stari "top_up_balance" kao fallback)
+                top_up_balance = info.get("topped_up_balance",
+                                          info.get("top_up_balance", "0.00"))
                 currency = info.get("currency", "CNY")
-            
-            self._update_balance_display(total_balance, currency, is_available)
-            
-            if is_available:
-                status_text = f"💰 Balans: {total_balance} {currency}"
             else:
-                status_text = f"💰 Balans: {total_balance} {currency} (⚠️ Nedostupan)"
+                # ⚠️ API nije vratio balance_infos - NE pregazi stari keš sa 0.00
+                cached = getattr(self, '_balance_info', None)
+                if cached and cached.get("total_balance") not in (None, "0.00", "?"):
+                    self._show_balance_status(cached)
+                    reply.deleteLater()
+                    return
+                self._update_balance_display("0.00", "0.00", "0.00", currency, is_available)
+                reply.deleteLater()
+                return
             
-            self.status_label.setText(status_text)
+            # Ako API vrati total 0.00 a komponente su > 0, izračunaj ukupno
+            try:
+                if float(total_balance) <= 0 and (float(granted_balance) > 0 or float(top_up_balance) > 0):
+                    total_balance = f"{float(granted_balance) + float(top_up_balance):.2f}"
+            except (ValueError, TypeError):
+                pass
+            
+            self._update_balance_display(total_balance, granted_balance, top_up_balance,
+                                         currency, is_available)
             
             # Sačuvaj balans u fajl
             try:
@@ -1749,32 +1841,85 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             print(f"[DeepSeek] Greška pri parsiranju balansa: {e}")
             # Pokaži sačuvani balans ako postoji
             if hasattr(self, '_balance_info') and self._balance_info:
-                bal = self._balance_info
-                self.status_label.setText(f"💰 Balans: {bal['total_balance']} {bal['currency']}")
+                self._show_balance_status(self._balance_info)
         
         try:
             reply.deleteLater()
         except:
             pass
     
-    def _update_balance_display(self, total_balance, currency, is_available=True):
+    def _update_balance_display(self, total_balance, granted_balance, top_up_balance,
+                                currency, is_available=True):
         """Ažurira prikaz balansa u status bar-u (pored status_label)."""
-        # Ovo je placeholder - balans se već prikazuje u status_label
-        # Dodajemo i tooltip na status label
-        if is_available:
-            tooltip = f"💰 Preostali kredit: {total_balance} {currency}\n✅ Nalog je aktivan"
-        else:
-            tooltip = f"💰 Preostali kredit: {total_balance} {currency}\n❌ Nalog nije dostupan"
-        
-        self.status_label.setToolTip(tooltip)
-        
         # Sačuvaj u atribut za kasnije korišćenje
         self._balance_info = {
             "total_balance": total_balance,
+            "granted_balance": granted_balance,
+            "top_up_balance": top_up_balance,
             "currency": currency,
             "is_available": is_available,
             "last_updated": datetime.now().strftime("%H:%M:%S")
         }
+        self._show_balance_status(self._balance_info)
+
+    def _show_balance_status(self, bal):
+        """Prikazuje balans u status baru - JEDAN red sa 3 dela i separatorima.
+
+        Format:  💰 Total: X  │  Granted: Y  │  Top-up: Z
+        Total = granted_balance + top_up_balance (računato na API-ju).
+        """
+        total = bal.get("total_balance", "?")
+        granted = bal.get("granted_balance", "?")
+        top_up = bal.get("top_up_balance", "?")
+        currency = bal.get("currency", "CNY")
+        is_available = bal.get("is_available", True)
+
+        # 📏 Puni tekst čuvamo za elidiranje pri resize-u
+        if is_available:
+            status_text = f"💰 Total: {total} {currency}  │  Granted: {granted}  │  Top-up: {top_up}"
+        else:
+            status_text = f"💰 Total: {total} {currency}  │  Granted: {granted}  │  Top-up: {top_up}  (⚠️ Nedostupan)"
+        self._status_full_text = status_text
+        # ⚠️ Obeleži da postavljamo balans da wrapper ne bi pregazio puni tekst
+        self._setting_balance_status = True
+        try:
+            self._apply_status_text()
+        finally:
+            self._setting_balance_status = False
+
+        # Tooltip sa detaljima
+        if is_available:
+            tip = f"💰 Preostali kredit: {total} {currency}\n" \
+                  f"📊 Granted: {granted} {currency}\n" \
+                  f"➕ Top-up: {top_up} {currency}\n" \
+                  f"✅ Nalog je aktivan"
+        else:
+            tip = f"💰 Preostali kredit: {total} {currency}\n" \
+                  f"📊 Granted: {granted} {currency}\n" \
+                  f"➕ Top-up: {top_up} {currency}\n" \
+                  f"❌ Nalog nije dostupan"
+        self.status_label.setToolTip(tip)
+
+    def _apply_status_text(self):
+        """Postavlja status_label sa elidiranjem ako je prozor uzak."""
+        if not self._status_full_text:
+            return
+        avail = self.status_label.width()
+        if avail <= 0:
+            avail = self.width() - 200
+        fm = self.status_label.fontMetrics()
+        elided = fm.elidedText(self._status_full_text, Qt.ElideRight, max(avail, 120))
+        # Zaštiti puni tekst da ga wrapper ne pregazi elidiranom verzijom
+        self._setting_balance_status = True
+        try:
+            self.status_label.setText(elided)
+        finally:
+            self._setting_balance_status = False
+
+    def resizeEvent(self, event):
+        """Kada se prozor resize-uje, prilagodi status_label (elidiraj ako je usko)."""
+        super().resizeEvent(event)
+        self._apply_status_text()
 
     # -------------------------------------------------------------------------
     # 💰 PRACENJE TROSKOVA (pricing.py - spic/van spica, cache hit, cene)
@@ -1782,34 +1927,91 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
     def _update_pricing_display(self):
         """Azurira indikator u status baru (spic/van spica + cena)."""
         off = is_off_peak()
+        t = self._tr
         if off:
-            txt = "⏰ Van špica −50%"
+            txt = t("pricing_off_peak")
             color = "#7dce94"  # zeleno
         else:
-            txt = "🌞 Špic (2x cena)"
+            txt = t("pricing_peak")
             color = "#e9a13b"  # narandzasto
 
         if self._session_requests > 0:
-            txt += f"  |  💵 {format_usd(self._last_request_cost)}"
+            txt += f"  |  💵 {format_cny(self._last_request_cost)}"
+            if self._last_usage and isinstance(self._last_usage, dict):
+                hit_pct = cache_savings_pct(self._last_usage)
+                if hit_pct > 0:
+                    txt += f"  |  💾 {t('pricing_cache')} {hit_pct:.0f}%"
 
         self.lbl_pricing.setText(txt)
         self.lbl_pricing.setStyleSheet(
             f"color: {color}; font-size: 11px; background: transparent; font-weight: bold;")
 
         tooltip = (
-            f"💵 Poslednji zahtev: {format_usd(self._last_request_cost)}\n"
-            f"💰 Sesija: {format_usd(self._session_cost)} "
-            f"({self._session_requests} zahteva)\n"
-            f"⏰ Status: {'VAN ŠPICA (−50% popust)' if off else 'ŠPIC (duplo skuplje)'}\n\n"
-            + peak_window_text()
+            f"💵 {t('cost_last_request')} {format_cny(self._last_request_cost)}\n"
+            f"💰 {t('cost_session')} {format_cny(self._session_cost)} "
+            f"({self._session_requests} {t('cost_requests_unit')})\n"
+            f"📊 {t('cost_status')} "
+            f"{t('pricing_status_off_peak') if off else t('pricing_status_peak')}\n\n"
+            + t("pricing_peak_window")
         )
         if self._last_usage and isinstance(self._last_usage, dict):
             hit_pct = cache_savings_pct(self._last_usage)
             tooltip += (
-                f"\n🧠 Cache hit: {hit_pct:.0f}% ulaznih tokena "
-                f"(steda 90% na ulazu!)"
+                f"\n💾 {t('cost_cache_hit')} {hit_pct:.0f}% {t('cost_input_tokens')} "
+                f"{t('cost_save_input')}"
             )
         self.lbl_pricing.setToolTip(tooltip)
+
+    def _show_pricing_details(self, event=None):
+        """Prikazuje detaljan pregled troškova sesije (klik na lbl_pricing)."""
+        off = is_off_peak()
+        t = self._tr
+        avg = (self._session_cost / self._session_requests
+               if self._session_requests > 0 else 0.0)
+
+        # Koliko bi koštalo bez cache-a (za ilustraciju uštede)
+        saved_text = ""
+        if self._last_usage and isinstance(self._last_usage, dict):
+            hit = self._last_usage.get("prompt_cache_hit_tokens", 0) or 0
+            miss = self._last_usage.get("prompt_cache_miss_tokens", 0) or 0
+            if hit > 0:
+                # 90% uštede na ulaznim tokenima iz keša
+                fake = dict(self._last_usage)
+                fake["prompt_cache_hit_tokens"] = 0
+                fake["prompt_cache_miss_tokens"] = hit + miss
+                without_cache = estimate_cost(self.current_model, fake)
+                saved = without_cache - self._last_request_cost
+                saved_text = (f"💵 {t('cost_saved_cache')} "
+                              f"{format_cny(saved)}\n")
+
+        lines = [
+            t("cost_title"),
+            "─" * 34,
+            f"📨 {t('cost_requests')}            {self._session_requests}",
+            f"💰 {t('cost_total')}             {format_cny(self._session_cost)}",
+            f"📈 {t('cost_average')}  {format_cny(avg)}",
+            f"💵 {t('cost_last_request')}   {format_cny(self._last_request_cost)}",
+            "",
+            f"📊 {t('cost_status')} "
+            f"{t('pricing_status_off_peak') if off else t('pricing_status_peak')}",
+            t("pricing_peak_window"),
+            "",
+        ]
+        if saved_text:
+            lines.append(saved_text)
+        if self._last_usage and isinstance(self._last_usage, dict):
+            hit_pct = cache_savings_pct(self._last_usage)
+            lines.append(f"💾 {t('cost_cache_hit')} {hit_pct:.0f}% "
+                         f"{t('cost_input_tokens')}")
+        lines.append("")
+        lines.append(t("cost_click_prices"))
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle(t("cost_window_title"))
+        msg.setIcon(QMessageBox.Information)
+        msg.setText("\n".join(lines))
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.exec_()
 
     def _record_usage(self, usage):
         """Parsira 'usage' iz API odgovora, racuna cenu i azurira prikaz.
@@ -1829,8 +2031,8 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         hit = usage.get("prompt_cache_hit_tokens", 0) or 0
         miss = usage.get("prompt_cache_miss_tokens", 0) or 0
         comp = usage.get("completion_tokens", 0) or 0
-        log(f"💰 usage: hit={hit} miss={miss} completion={comp} → {format_usd(cost)} "
-            f"(sesija: {format_usd(self._session_cost)})")
+        log(f"💰 usage: hit={hit} miss={miss} completion={comp} → {format_cny(cost)} "
+            f"(sesija: {format_cny(self._session_cost)})")
         return cost
 
     # =========================================================================
@@ -1863,6 +2065,11 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             return
 
 
+
+        # ⛔ API gate: ako je neki drugi zahtev (models/balance/chat) u toku, sačekaj pa probaj ponovo
+        if not self._api_gate_try_acquire():
+            QTimer.singleShot(1200, lambda: self._call_api(messages_override=messages_override))
+            return
 
         self._set_ui_enabled(False)
 
@@ -1998,6 +2205,8 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             return
         
         self._stream_active = False
+        # ⛔ Streaming zahtev je završen - oslobodi API gate
+        self._api_gate_release()
         self._stop_thinking_animation()
         
         # Prikazi ceo odgovor odjednom
@@ -2056,6 +2265,9 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         if self._stream_was_active:
             self._stream_was_active = False
             return
+
+        # ⛔ Chat API zahtev je završen (uspeh ili greška) - oslobodi API gate
+        self._api_gate_release()
 
         log("🟢 _on_api_reply() - stigao odgovor")
         # Ukloni "razmišljam..."
@@ -2194,6 +2406,8 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
                 self._append_message("assistant", self._escape_html(content))
                 self.messages.append({"role": "assistant", "content": content})
                 self._save_history()
+                # Prikazi cenu zahteva u chatu
+                self._append_cost_banner()
                 # 🔄 Sažmi history ako je prevelik
                 self._summarize_history()
                 self.status_label.setText("✅ Odgovor primljen")

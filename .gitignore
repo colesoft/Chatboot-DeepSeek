@@ -46,3 +46,11 @@ chatbot_app/deepseek.png
 # Ostali generisani/privremeni
 *.jfif
 zagit/
+
+# Privremeni skriptovi za proveru/dijagnostiku
+_check*.py
+_makediff.py
+_scan*.py
+_scan*.txt
+_diff.txt
+test_balance_api*.py

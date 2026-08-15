@@ -156,6 +156,31 @@ def format_usd(cost):
     return f"${cost:.6f}"
 
 
+# =============================================================================
+# KONVERZIJA USD -> CNY
+# =============================================================================
+# DeepSeek balans stiže u CNY (yuan), pa i potrošnju prikazujemo u CNY da
+# budu konzistentni. Ovo je približan fiksni kurs - ažurirati po potrebi.
+USD_TO_CNY = 7.2
+
+
+def usd_to_cny(cost_usd):
+    """Konvertuje iznos iz USD u CNY po fiksnom kursu."""
+    return cost_usd * USD_TO_CNY
+
+
+def format_cny(cost_usd):
+    """Formatira potrošnju (koja je interno u USD) kao CNY: ¥0.03 ili ¥0.00."""
+    cny = usd_to_cny(cost_usd)
+    if cny >= 1:
+        return f"¥{cny:.2f}"
+    if cny >= 0.01:
+        return f"¥{cny:.4f}"
+    if cny >= 0.0001:
+        return f"¥{cny:.6f}"
+    return "¥0.00"
+
+
 def cache_savings_pct(usage):
     """Koliko procenata ulaznih tokena je serviran iz keša (0-100)."""
     if not usage or not isinstance(usage, dict):

@@ -27,6 +27,7 @@
 - ⛔ **STOP dugme** — prekida AI petlju u svakom trenutku
 - 🌐 **Višejezični interfejs** — 🇷🇸 🇬🇧 🇨🇳
 - 📜 **History** — automatsko čuvanje i učitavanje sesija
+- 💰 **Praćenje troškova** — cena po zahtevu i sesiji, špic/van špica (do −50%), cache hit ušteda; klik na indikator otvara **dijalog detalja** (broj zahteva, ukupno, prosek, ušteda po cache)
 - ⚙️ **Podešavanja** — prilagodi sve parametre kroz UI
 
 ### 🚀 Pokretanje
@@ -52,6 +53,7 @@ python deepseek_chatbot.py
 - ⛔ **STOP button** — breaks AI loop at any moment
 - 🌐 **Multilingual UI** — 🇷🇸 🇬🇧 🇨🇳
 - 📜 **History** — automatic session saving and loading
+- 💰 **Cost tracking** — per-request & session price, peak/off-peak (up to −50%), cache-hit savings; click the indicator to open a **details dialog** (request count, total, average, cache savings)
 - ⚙️ **Settings** — customize all parameters via UI
 
 ### 🚀 How to run
@@ -77,6 +79,7 @@ python deepseek_chatbot.py
 - ⛔ **停止按钮** — 随时中断 AI 循环
 - 🌐 **多语言界面** — 🇷🇸 🇬🇧 🇨🇳
 - 📜 **历史记录** — 自动保存和加载会话
+- 💰 **成本追踪** — 每次请求和会话费用、高峰/低谷（最高 −50%）、缓存命中节省；点击指示器打开**详情对话框**（请求数、总额、平均值、缓存节省）
 - ⚙️ **设置** — 通过界面自定义所有参数
 
 ### 🚀 运行方式
@@ -132,6 +135,7 @@ All limits are adjustable in ⚙️ Settings / 所有限制可在 ⚙️ 设置�
 │   ├── utils.py             # Helper funkcije / 工具函数
 │   ├── tools.py             # ToolExecutor + alati / 工具执行器
 │   ├── api_client.py        # DeepSeek API logika / API 逻辑
+│   ├── pricing.py           # Cene, špic/van špica, cache, procena troškova / 价格、高峰/低谷、缓存、成本估算
 │   ├── widgets.py           # DiffDialog i widgeti / 对话框
 │   ├── history.py           # HistoryMixin (sesije) / 历史记录
 │   └── ui/
