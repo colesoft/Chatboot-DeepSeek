@@ -34,7 +34,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QUrl, QJsonDocument, QTimer, QRect, QPropertyAnimation, QEasingCurve, QEventLoop
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
-from PyQt5.QtGui import QFont, QColor, QPalette, QTextCursor, QTextCharFormat, QIcon, QPixmap, QPainter, QCursor, QFontDatabase
+from PyQt5.QtGui import QFont, QColor, QPalette, QTextCursor, QTextCharFormat, QIcon, QPixmap, QPainter, QCursor, QFontDatabase, QDesktopServices
 from PyQt5.QtGui import QTextOption
 
 # =============================================================================
@@ -65,6 +65,10 @@ from chatbot_app.utils import (
 from chatbot_app.tools import TOOLS_DEFINITIONS, ToolExecutor
 from chatbot_app.widgets import DiffDialog
 from chatbot_app.api_client import validate_and_fix_messages
+from chatbot_app.pricing import (
+    estimate_cost, format_usd, is_off_peak, peak_window_text,
+    get_max_tokens, cache_savings_pct,
+)
 from chatbot_app.history import HistoryMixin
 from chatbot_app.ui.dialogs import DialogsMixin
 from chatbot_app.ui.project_context import ProjectContextMixin
@@ -120,6 +124,11 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         self._thinking_timer = None
         self._thinking_frames = 0
         self._balance_info = self._load_cached_balance()  # Učitaj keširani balans
+        # 💰 Praćenje troškova sesije (pricing.py)
+        self._session_cost = 0.0        # Ukupna cena ove sesije (USD)
+        self._session_requests = 0      # Broj API zahteva u sesiji
+        self._last_usage = None         # usage iz poslednjeg odgovora
+        self._last_request_cost = 0.0   # Cena poslednjeg zahteva (USD)
         self.project_context = ""  # Kontekst projekta (sta je uradjeno)
         self._load_project_context()  # Učitaj kontekst projekta
 
@@ -151,6 +160,12 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
                 self.status_label.setText(f"💰 Balans: {bal['total_balance']} {bal['currency']}")
             QTimer.singleShot(1500, self.fetch_models_from_api)
             QTimer.singleShot(3000, self.fetch_user_balance)
+
+        # ⏰ Indikator špic/van špica: prikaži odmah + osvežavaj svakih 60s
+        self._update_pricing_display()
+        self._pricing_timer = QTimer(self)
+        self._pricing_timer.timeout.connect(self._update_pricing_display)
+        self._pricing_timer.start(60000)
 
     # -------------------------------------------------------------------------
     # POMERANJE PROZORA (frameless drag)
@@ -548,6 +563,28 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         """)
         row1.addWidget(self.btn_balance)
 
+        # 💲 Dugme "Proveri cene" - otvara zvaničnu stranicu sa cenama
+        self.btn_pricing = QPushButton("💲")
+        self.btn_pricing.setToolTip("Otvori zvanične cene (api-docs.deepseek.com)\n"
+                                    "Špic: 01–04h i 06–10h UTC (2x cena) | Van špica: −50%")
+        self.btn_pricing.setFixedWidth(36)
+        self.btn_pricing.clicked.connect(self._open_pricing_page)
+        self.btn_pricing.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #e9a13b;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                padding: 4px 6px;
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                background: rgba(233,161,59,0.15);
+                border-color: #e9a13b;
+            }
+        """)
+        row1.addWidget(self.btn_pricing)
+
         toolbar_layout.addLayout(row1)
 
         # Drugi red: project path i Open dugme
@@ -595,6 +632,12 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         self.status_label = QLabel("✅ Spreman")
         self.status_label.setStyleSheet("color: #888; font-size: 11px; background: transparent;")
         status_layout.addWidget(self.status_label)
+
+        # ⏰ Indikator špic/van špica + cena poslednjeg zahteva
+        self.lbl_pricing = QLabel("")
+        self.lbl_pricing.setStyleSheet("color: #7dce94; font-size: 11px; background: transparent;")
+        self.lbl_pricing.setToolTip("Cene: " + peak_window_text())
+        status_layout.addWidget(self.lbl_pricing)
 
         status_layout.addStretch()
 
@@ -1610,6 +1653,14 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
     # =========================================================================
     # 💰 API: Dohvatanje balansa sa https://api.deepseek.com/get-user-balance
     # =========================================================================
+    def _open_pricing_page(self):
+        """Otvara zvaničnu stranicu sa cenama u default browser-u."""
+        url = QUrl("https://api-docs.deepseek.com/quick_start/pricing")
+        if not QDesktopServices.openUrl(url):
+            self._show_error_msg("Ne mogu da otvorim browser.\n"
+                                 "Cene: https://api-docs.deepseek.com/quick_start/pricing")
+        log("💲 _open_pricing_page() - otvoren pricing URL")
+
     def fetch_user_balance(self):
         """Dohvata preostali kredit sa DeepSeek API-ja."""
         log("💰 fetch_user_balance() - krece")
@@ -1725,6 +1776,63 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             "last_updated": datetime.now().strftime("%H:%M:%S")
         }
 
+    # -------------------------------------------------------------------------
+    # 💰 PRACENJE TROSKOVA (pricing.py - spic/van spica, cache hit, cene)
+    # -------------------------------------------------------------------------
+    def _update_pricing_display(self):
+        """Azurira indikator u status baru (spic/van spica + cena)."""
+        off = is_off_peak()
+        if off:
+            txt = "⏰ Van špica −50%"
+            color = "#7dce94"  # zeleno
+        else:
+            txt = "🌞 Špic (2x cena)"
+            color = "#e9a13b"  # narandzasto
+
+        if self._session_requests > 0:
+            txt += f"  |  💵 {format_usd(self._last_request_cost)}"
+
+        self.lbl_pricing.setText(txt)
+        self.lbl_pricing.setStyleSheet(
+            f"color: {color}; font-size: 11px; background: transparent; font-weight: bold;")
+
+        tooltip = (
+            f"💵 Poslednji zahtev: {format_usd(self._last_request_cost)}\n"
+            f"💰 Sesija: {format_usd(self._session_cost)} "
+            f"({self._session_requests} zahteva)\n"
+            f"⏰ Status: {'VAN ŠPICA (−50% popust)' if off else 'ŠPIC (duplo skuplje)'}\n\n"
+            + peak_window_text()
+        )
+        if self._last_usage and isinstance(self._last_usage, dict):
+            hit_pct = cache_savings_pct(self._last_usage)
+            tooltip += (
+                f"\n🧠 Cache hit: {hit_pct:.0f}% ulaznih tokena "
+                f"(steda 90% na ulazu!)"
+            )
+        self.lbl_pricing.setToolTip(tooltip)
+
+    def _record_usage(self, usage):
+        """Parsira 'usage' iz API odgovora, racuna cenu i azurira prikaz.
+
+        Vraca cenu poslednjeg zahteva u USD (0.0 ako nema usage-a).
+        """
+        if not usage or not isinstance(usage, dict):
+            return 0.0
+        self._last_usage = usage
+        cost = estimate_cost(self.current_model, usage)
+        self._last_request_cost = cost
+        self._session_cost += cost
+        self._session_requests += 1
+        self._update_pricing_display()
+
+        # Detaljniji log za debugging
+        hit = usage.get("prompt_cache_hit_tokens", 0) or 0
+        miss = usage.get("prompt_cache_miss_tokens", 0) or 0
+        comp = usage.get("completion_tokens", 0) or 0
+        log(f"💰 usage: hit={hit} miss={miss} completion={comp} → {format_usd(cost)} "
+            f"(sesija: {format_usd(self._session_cost)})")
+        return cost
+
     # =========================================================================
     # 📡 API POZIV
     # =========================================================================
@@ -1800,7 +1908,8 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             # ⚠️ 8192 = maksimum za deepseek-chat. Sa 4096 AI često potroši
             # sav limit na razmišljanje (reasoning_content) pa vrati finish_reason="length"
             # sa praznim content-om i bez tool_calls.
-            "max_tokens": 8192,
+            # 💰 max_tokens po modelu: deepseek-v4-* → 32768, stari (V3.2-Exp) → 8192
+            "max_tokens": get_max_tokens(self.current_model),
         }
         
         # 📡 Dodaj streaming ako je omogućen i nismo u tool petlji
@@ -2054,6 +2163,11 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             self._set_ui_enabled(True)
             self._loop_active = False
             return
+
+        # 💰 Zabeleži usage i cenu zahteva (špic/van špica + cache hit)
+        usage = data.get("usage")
+        if usage:
+            self._record_usage(usage)
 
         try:
             choice = data["choices"][0]
