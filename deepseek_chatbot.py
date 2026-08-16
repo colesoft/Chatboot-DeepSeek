@@ -18,11 +18,14 @@ import sys
 import json
 import os
 import re
+import base64
 import shutil
 import glob
 import subprocess
 import traceback
 import time
+import threading
+import tempfile
 from datetime import datetime
 
 from PyQt5.QtWidgets import (
@@ -33,10 +36,10 @@ from PyQt5.QtWidgets import (
     QFrame, QSizePolicy, QGraphicsDropShadowEffect, QTabWidget, QTextBrowser,
     QButtonGroup, QSlider, QListWidget, QListWidgetItem, QGridLayout
 )
-from PyQt5.QtCore import Qt, QUrl, QJsonDocument, QTimer, QRect, QPropertyAnimation, QEasingCurve, QEventLoop
+from PyQt5.QtCore import Qt, QUrl, QJsonDocument, QTimer, QRect, QPropertyAnimation, QEasingCurve, QEventLoop, QByteArray, QBuffer, QIODevice, QMimeData
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
-from PyQt5.QtGui import QFont, QColor, QPalette, QTextCursor, QTextCharFormat, QIcon, QPixmap, QPainter, QCursor, QFontDatabase, QDesktopServices
-from PyQt5.QtGui import QTextOption
+from PyQt5.QtGui import QFont, QColor, QPalette, QTextCursor, QTextCharFormat, QIcon, QPixmap, QPainter, QCursor, QFontDatabase, QDesktopServices, QImage
+from PyQt5.QtGui import QTextOption, QScreen
 
 # =============================================================================
 # chatbot_app paket - refaktorisani moduli (Faza 1)
@@ -64,6 +67,7 @@ from chatbot_app.utils import (
     estimate_tokens, count_context_tokens, short_path,
 )
 from chatbot_app.tools import TOOLS_DEFINITIONS, ToolExecutor
+from chatbot_app.gmail import get_gmail_unread_count
 from chatbot_app.widgets import DiffDialog
 from chatbot_app.api_client import validate_and_fix_messages
 from chatbot_app.pricing import (
@@ -74,6 +78,75 @@ from chatbot_app.history import HistoryMixin
 from chatbot_app.ui.dialogs import DialogsMixin
 from chatbot_app.ui.project_context import ProjectContextMixin
 from chatbot_app.logger import log, log_time
+
+
+# =============================================================================
+# 👁️ VISION (slanje slika) - DeepSeek V4 0324 nativno podržava slike
+# =============================================================================
+def _resolve_vision_model():
+    """Vraća vision model za analizu slika (deepseek-v4-pro ako postoji)."""
+    for mid in ("deepseek-v4-pro", "deepseek-v4-flash"):
+        if mid in DEEPSEEK_MODELS or mid in DEEPSEEK_SUPPORTED_MODELS:
+            return mid
+    return DEFAULT_MODEL
+
+
+VISION_MODEL = _resolve_vision_model()
+
+
+# =============================================================================
+# 📋 INPUT POLJE SA PASTE / DRAG&DROP SLIKA
+# =============================================================================
+class PasteLineEdit(QLineEdit):
+    """QLineEdit koji hvata Ctrl+V slike (screenshot-e) i drag & drop slika.
+
+    - Ctrl+V sa slikom u clipboard-u (npr. Win+Shift+S screenshot) → poziva
+      on_image_pasted(QImage) umesto da umeće tekst.
+    - Drag & drop slika fajlova na polje → poziva on_image_pasted(None, path).
+    - Običan tekst se ponaša normalno.
+    """
+
+    IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
+
+    def __init__(self, on_image_pasted=None, parent=None):
+        super().__init__(parent)
+        self._on_image_pasted = on_image_pasted
+
+    @staticmethod
+    def _is_image_path(path):
+        return os.path.splitext(str(path).lower())[1] in PasteLineEdit.IMAGE_EXTS
+
+    def insertFromMimeData(self, source):
+        """PyQt hook - poziva se pri paste (Ctrl+V)."""
+        if source.hasImage() and self._on_image_pasted is not None:
+            img = source.imageData()
+            if img is not None:
+                self._on_image_pasted(img)
+                return
+        super().insertFromMimeData(source)
+
+    def dragEnterEvent(self, event):
+        mime = event.mimeData()
+        if mime.hasUrls() and any(
+            u.isLocalFile() and self._is_image_path(u.toLocalFile())
+            for u in mime.urls()
+        ):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        mime = event.mimeData()
+        if mime.hasUrls() and self._on_image_pasted is not None:
+            added = False
+            for u in mime.urls():
+                if u.isLocalFile() and self._is_image_path(u.toLocalFile()):
+                    self._on_image_pasted(None, path=u.toLocalFile())
+                    added = True
+            if added:
+                event.acceptProposedAction()
+                return
+        super().dropEvent(event)
 
 
 # =============================================================================
@@ -97,6 +170,7 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         self.project_path = load_project_path()
         self.current_lang = load_language()
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self._pending_images = []  # 📎 Privremeno izabrane slike pre slanja (čuvaju se kao putanje)
         self._loop_active = False
         # ⛔ Zajednički API gate - sprečava paralelne zahteve (API dozvoljava samo 1 istovremeno)
         self._api_gate_busy = False
@@ -763,8 +837,9 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         """)
         row.addWidget(self.btn_thinking)
 
-        self.input_field = QLineEdit()
-        self.input_field.setPlaceholderText("Napiši šta treba uraditi... (Enter = pošalji)")
+        # 📋 Input polje sa podrškom za paste (Ctrl+V) i drag&drop slika
+        self.input_field = PasteLineEdit(self._on_image_pasted)
+        self.input_field.setPlaceholderText("Napiši šta treba uraditi... (Enter = pošalji, Ctrl+V = nalepi screenshot)")
         self.input_field.setStyleSheet("""
             QLineEdit {
                 background-color: #16213e;
@@ -781,6 +856,50 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         """)
         self.input_field.returnPressed.connect(self._on_send_or_stop)
         row.addWidget(self.input_field)
+
+        # 📎 Slike dugme (DeepSeek V4 vision)
+        self.btn_image = QPushButton("📎")
+        self.btn_image.setToolTip("Dodaj sliku sa diska (V4 vision analizira slike)")
+        self.btn_image.setFixedWidth(36)
+        self.btn_image.setFixedHeight(32)
+        self.btn_image.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #aaa;
+                border: 2px solid #3a3a5e;
+                border-radius: 8px;
+                padding: 0px;
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                border-color: #e94560;
+                background: rgba(255,255,255,0.05);
+            }
+        """)
+        self.btn_image.clicked.connect(self._pick_images)
+        row.addWidget(self.btn_image)
+
+        # 📸 Screenshot dugme (snimi ekran posle 3s countdown-a)
+        self.btn_screenshot = QPushButton("📸")
+        self.btn_screenshot.setToolTip("Snimi screenshot ekrana (3s countdown - stigneš da prebaciš prozor)")
+        self.btn_screenshot.setFixedWidth(36)
+        self.btn_screenshot.setFixedHeight(32)
+        self.btn_screenshot.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #aaa;
+                border: 2px solid #3a3a5e;
+                border-radius: 8px;
+                padding: 0px;
+                font-size: 16px;
+            }
+            QPushButton:hover {
+                border-color: #e94560;
+                background: rgba(255,255,255,0.05);
+            }
+        """)
+        self.btn_screenshot.clicked.connect(self._capture_screenshot)
+        row.addWidget(self.btn_screenshot)
 
         # 😊 Emoji dugme
         self.btn_emoji = QPushButton("😊")
@@ -832,6 +951,14 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         row.addWidget(self.send_btn)
 
         input_layout.addLayout(row)
+
+        # 🖼️ Traka sa odabranim slikama (thumbnail-i, pojavljuje se tek kad se izaberu slike)
+        self.thumb_strip = QWidget()
+        self.thumb_strip.setVisible(False)
+        self.thumb_layout = QHBoxLayout(self.thumb_strip)
+        self.thumb_layout.setContentsMargins(4, 2, 4, 2)
+        self.thumb_layout.setSpacing(8)
+        input_layout.insertWidget(1, self.thumb_strip)
 
         # Hint
         self.lbl_hint = QLabel("💡 Npr: 'pokaži main.cpp', 'popravi grešku', 'nađi QString', 'dodaj funkciju'")
@@ -959,6 +1086,183 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
     # -------------------------------------------------------------------------
     # ⛔ STOP / SLANJE PORUKE (isto dugme)
     # -------------------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # 👁️ SLIKE (DeepSeek V4 vision) - izbor, thumbnail-i, slanje
+    # -------------------------------------------------------------------------
+    def _pick_images(self):
+        """Otvara dijalog za izbor slika i dodaje ih u listu čekanja."""
+        if self._loop_active:
+            return
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Izaberi slike (DeepSeek V4 vision)",
+            os.path.expanduser("~"),
+            "Slike (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;Svi fajlovi (*.*)",
+        )
+        if not files:
+            return
+        added = 0
+        for f in files:
+            if f not in self._pending_images:
+                self._pending_images.append(f)
+                added += 1
+        if added:
+            self._refresh_thumbnails()
+            self.status_label.setText(f"📎 Dodato {added} slika - piši poruku i pošalji")
+
+    def _on_image_pasted(self, image=None, path=None):
+        """Callback iz PasteLineEdit - prima sliku iz clipboard-a (Ctrl+V)
+        ili putanju slike iz drag & drop-a i dodaje je u listu čekanja."""
+        if self._loop_active:
+            return
+        if image is not None:
+            # 💾 Sačuvaj clipboard sliku u temp fajl
+            try:
+                if not isinstance(image, QImage):
+                    image = QImage(image)
+                path = os.path.join(
+                    tempfile.gettempdir(),
+                    f"deepseek_paste_{int(time.time() * 1000)}.png",
+                )
+                if not image.save(path, "PNG"):
+                    log("⚠️ Ne mogu sačuvati clipboard sliku")
+                    return
+            except Exception as e:
+                log(f"⚠️ _on_image_pasted greška: {e}")
+                return
+        if not path or not os.path.exists(path):
+            return
+        if path not in self._pending_images:
+            self._pending_images.append(path)
+        self._refresh_thumbnails()
+        src = "📸 paste" if "deepseek_paste_" in os.path.basename(path) else "📎 drag&drop"
+        self.status_label.setText(
+            f"{src}: 1 slika dodata - napiši poruku (ili samo pošalji za analizu slike)")
+
+    def _capture_screenshot(self):
+        """Screenshot ekrana sa 3s countdown-a (da korisnik prebaci prozor)."""
+        if self._loop_active:
+            return
+        self.status_label.setText(
+            "📸 Screenshot za 3 sekunde - prebaci se na željeni prozor / minimizuj app...")
+        QTimer.singleShot(3000, self._do_capture_screenshot)
+
+    def _do_capture_screenshot(self):
+        """Snima primarni ekran i dodaje snimak u listu čekanja."""
+        try:
+            screen = QApplication.primaryScreen()
+            if screen is None:
+                self.status_label.setText("⚠️ Nema ekrana za screenshot")
+                return
+            pixmap = screen.grabWindow(0)
+            if pixmap.isNull():
+                self.status_label.setText("⚠️ Screenshot neuspešan")
+                return
+            path = os.path.join(
+                tempfile.gettempdir(),
+                f"deepseek_screen_{int(time.time() * 1000)}.png",
+            )
+            if not pixmap.save(path, "PNG"):
+                self.status_label.setText("⚠️ Ne mogu sačuvati screenshot")
+                return
+            if path not in self._pending_images:
+                self._pending_images.append(path)
+            self._refresh_thumbnails()
+            self.status_label.setText(
+                "📸 Screenshot dodat - napiši poruku (ili samo pošalji za analizu)")
+        except Exception as e:
+            log(f"⚠️ _do_capture_screenshot greška: {e}")
+            self.status_label.setText("⚠️ Screenshot neuspešan")
+
+    @staticmethod
+    def _mime_for(path):
+        """Vraća MIME tip slike na osnovu ekstenzije (default: image/png)."""
+        return {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".bmp": "image/bmp",
+            ".webp": "image/webp",
+        }.get(os.path.splitext(path)[1].lower(), "image/png")
+
+    def _remove_image(self, path):
+        """Uklanja sliku iz liste čekanja (klik na X na thumbnail-u)."""
+        if path in self._pending_images:
+            self._pending_images.remove(path)
+        self._refresh_thumbnails()
+
+    def _thumb_data(self, path):
+        """Vraća data URI (base64) malog thumbnail-a slike za prikaz u QTextEdit."""
+        try:
+            pix = QPixmap(path)
+            if pix.isNull():
+                return ""
+            pix = pix.scaled(72, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            ba = QByteArray()
+            buf = QBuffer(ba)
+            buf.open(QIODevice.WriteOnly)
+            pix.save(buf, "PNG")
+            return "data:image/png;base64," + bytes(ba.toBase64()).decode("utf-8")
+        except Exception as e:
+            log(f"⚠️ _thumb_data greška: {e}")
+            return ""
+
+    def _refresh_thumbnails(self):
+        """Prikazuje thumbnail-e izabranih slika u traci ispod input polja."""
+        # Očisti traku
+        while self.thumb_layout.count():
+            item = self.thumb_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        if not self._pending_images:
+            self.thumb_strip.setVisible(False)
+            return
+
+        for path in self._pending_images:
+            wrap = QWidget()
+            lay = QVBoxLayout(wrap)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(0)
+
+            data_uri = self._thumb_data(path)
+            if not data_uri:
+                continue
+            lbl = QLabel()
+            lbl.setPixmap(QPixmap(data_uri))
+            lbl.setFixedSize(64, 64)
+            lbl.setStyleSheet("border: 1px solid #3a3a5e; border-radius: 6px;")
+            lbl.setToolTip(path)
+            lay.addWidget(lbl)
+
+            btn_x = QPushButton("✕")
+            btn_x.setFixedSize(16, 16)
+            btn_x.setStyleSheet("""
+                QPushButton {
+                    background: #e94560;
+                    color: white;
+                    border: none;
+                    border-radius: 8px;
+                    font-size: 9px;
+                    padding: 0px;
+                }
+                QPushButton:hover { background: #ff6b81; }
+            """)
+            btn_x.clicked.connect(lambda checked=False, p=path: self._remove_image(p))
+            lay.addWidget(btn_x, alignment=Qt.AlignCenter)
+
+            self.thumb_layout.addWidget(wrap)
+
+        self.thumb_strip.setVisible(True)
+
+    def _reset_vision_state(self):
+        """Vraća model label na korisnikov izbor posle vision (slika) zahteva."""
+        if getattr(self, "_using_vision", False):
+            self._using_vision = False
+            if hasattr(self, "lbl_model"):
+                self.lbl_model.setText(f"🧠 Model: {self.current_model}")
+
     def _on_send_or_stop(self):
         """Kad se klikne na dugme: šalje poruku ILI zaustavlja AI."""
         if self._loop_active:
@@ -1058,13 +1362,48 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             return
 
         user_text = self.input_field.text().strip()
-        if not user_text:
+        images = self._pending_images[:]
+
+        if not user_text and not images:
             return
+        if not user_text:
+            user_text = "Analiziraj priloženu sliku."
 
-        self._append_message("user", self._escape_html(user_text))
+        # 📎 Dodaj slike u poruku (DeepSeek V4 vision - content list sa image_url)
+        if images:
+            content_parts = [{"type": "text", "text": user_text}]
+            for img_path in images:
+                if not os.path.exists(img_path):
+                    log(f"⚠️ Slika ne postoji: {img_path}")
+                    continue
+                try:
+                    with open(img_path, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode("utf-8")
+                    content_parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{self._mime_for(img_path)};base64,{b64}"},
+                    })
+                except Exception as e:
+                    log(f"⚠️ Greška pri čitanju slike {img_path}: {e}")
+            self.messages.append({"role": "user", "content": content_parts})
+            self._using_vision = True
+        else:
+            self.messages.append({"role": "user", "content": user_text})
+            self._using_vision = False
+
+        # 🖼️ Prikaži slike u chat poruci (thumbnail) + očisti traku
+        if images:
+            thumbs = "".join(
+                f'<img src="{self._thumb_data(p)}" width="72" height="72" '
+                f'style="border-radius:6px; border:1px solid #3a3a5e; margin:3px;">'
+                for p in images if os.path.exists(p)
+            )
+            self._append_message("user", self._escape_html(user_text) + "<br>" + thumbs)
+        else:
+            self._append_message("user", self._escape_html(user_text))
         self.input_field.clear()
-
-        self.messages.append({"role": "user", "content": user_text})
+        self._pending_images = []
+        self._refresh_thumbnails()
 
         # 🔄 Sažmi history ako je prevelik
         self._summarize_history()
@@ -1088,7 +1427,120 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
 
         self._loop_active = True
         self._update_send_button(is_running=True)
+        self._check_gmail_before_send()
+
+    # -------------------------------------------------------------------------
+    # 📬 GMAIL PROVERA (nepročitani email-ovi pre slanja)
+    # -------------------------------------------------------------------------
+    def _check_gmail_before_send(self):
+        """Proverava Gmail nepročitane email-ove (u pozadini) pre poziva API-ja.
+
+        Ako je Gmail podešavanje uključeno i ima nepročitanih email-ova,
+        AI dobija instrukciju da PRVO odgovori na email pitanje,
+        pa onda nastavi sa ostatkom zahteva.
+        """
+        settings = load_settings()
+        enabled = settings.get("gmail_enabled", False)
+        user = (settings.get("gmail_user") or "").strip()
+        app_pwd = (settings.get("gmail_app_password") or "").strip()
+
+        # Ako Gmail nije konfigurisan - idi direktno na API
+        if not (enabled and user and app_pwd):
+            self._call_api()
+            return
+
+        self.status_label.setText("📬 Proveravam Gmail nepročitane email-ove...")
+
+        # Pozadinski thread - ne blokiramo UI
+        self._gmail_result = {"done": False, "count": -1}
+        result = self._gmail_result
+
+        def _worker():
+            try:
+                result["count"] = get_gmail_unread_count(
+                    user, app_pwd, settings.get("gmail_search_query", ""))
+            except Exception as e:
+                log(f"⚠️ Gmail provera greška: {e}")
+                result["count"] = -1
+            finally:
+                result["done"] = True
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+        self._gmail_poll_count = 0
+        if getattr(self, "_gmail_timer", None) is not None:
+            self._gmail_timer.stop()
+        self._gmail_timer = QTimer(self)
+        self._gmail_timer.timeout.connect(self._on_gmail_poll)
+        self._gmail_timer.start(200)
+
+    def _on_gmail_poll(self):
+        """Prati rezultat Gmail provere (200ms interval, max ~8s)."""
+        self._gmail_poll_count += 1
+        if self._gmail_result.get("done"):
+            self._gmail_timer.stop()
+            self._gmail_timer.deleteLater()
+            self._gmail_timer = None
+            self._gmail_continue()
+        elif self._gmail_poll_count > 40:  # 8 sekundi timeout
+            self._gmail_timer.stop()
+            self._gmail_timer.deleteLater()
+            self._gmail_timer = None
+            log("⚠️ Gmail provera predugo traje - nastavljam bez provere")
+            self.status_label.setText("⚠️ Gmail provera predugo traje - nastavljam...")
+            self._call_api()
+
+    def _gmail_continue(self):
+        """Nastavlja slanje - ubacuje email notu ako ima nepročitanih."""
+        count = self._gmail_result.get("count", -1)
+        settings = load_settings()
+        query = (settings.get("gmail_search_query") or "").strip()
+
+        if count > 0:
+            self._inject_gmail_notice(count, query)
+            self.status_label.setText(
+                f"📬 {count} nepročitanih email-ova – AI odgovara prvo na email pitanje")
+        elif count == 0:
+            self.status_label.setText(
+                "✅ Nema nepročitanih email-ova" + (f" ({query})" if query else ""))
+        else:
+            self.status_label.setText("⚠️ Gmail nedostupan – nastavljam bez provere")
         self._call_api()
+
+    def _inject_gmail_notice(self, count, query):
+        """Ubacuje notu da AI prvo odgovori na email pitanje.
+
+        ⚠️ DeepSeek NE podržava dve uzastopne system poruke, pa:
+        - ako bi nota bila odmah posle postojeće system poruke (prva poruka u
+          sesiji), spaja se u korisničku poruku (NE u system prompt),
+        - inače se umeće kao zasebna system poruka PRE poslednje user poruke
+          (poslednja poruka ostaje user - API to najbolje prima).
+        """
+        notice = (
+            f"[📬 GMAIL] Imate {count} nepročitanih email-ova u Gmail-u"
+            + (f" (upit: {query})" if query else "")
+            + ". PRVO odgovori na pitanje korisnika koje se odnosi na te email-ove, "
+              "pa onda nastavi sa ostatkom zahteva."
+        )
+
+        if self.messages and self.messages[-1].get("role") == "user":
+            idx = len(self.messages) - 1
+            if idx > 0 and self.messages[idx - 1].get("role") == "system":
+                # Prva poruka u sesiji - spoji notu u user poruku
+                user_msg = self.messages[idx]
+                content = user_msg.get("content", "")
+                if isinstance(content, list):
+                    content = list(content) + [{"type": "text", "text": "\n\n" + notice}]
+                elif isinstance(content, str):
+                    content = content + "\n\n" + notice
+                else:
+                    content = notice
+                user_msg["content"] = content
+            else:
+                self.messages.insert(idx, {"role": "system", "content": notice})
+        else:
+            # Fallback (retko) - dodaj kao system poruku na kraj
+            self.messages.append({"role": "system", "content": notice})
 
     def _summarize_history(self):
         """Sažima istoriju ako je previše narasla.
