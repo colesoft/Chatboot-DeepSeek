@@ -317,14 +317,20 @@ def main():
             pass
     app.setWindowIcon(get_deepseek_icon())
     
-    print("[DEBUG] Before show()")
-    window.show()
-    
-    # Sačekaj 10 sekundi da splash ostane vidljiv (ili klikni na njega da ga zatvoriš)
-    splash.mousePressEvent = lambda event: splash.close()
-    QTimer.singleShot(10000, splash.close)
-    
-    print("[DEBUG] After show()")
+    # Glavni prozor se prikazuje TEK kada se splash zatvori
+    # (klikom na splash ILI automatski posle zadate pauze)
+    def show_main_window():
+        splash.close()              # zatvori splash ako još nije
+        window.show()               # tek sada prikaži glavni prozor
+        print("[DEBUG] Main window shown after splash closed")
+
+    # Klik na splash = odmah zatvori splash i prikaži glavni prozor
+    splash.mousePressEvent = lambda event: show_main_window()
+
+    # Automatski zatvori splash posle 10 sekundi i prikaži glavni prozor
+    QTimer.singleShot(4000, show_main_window)
+
+    print("[DEBUG] Splash visible, waiting to close...")
     app.setWindowIcon(get_deepseek_icon())
     print("[DEBUG] Before exec_()")
     sys.exit(app.exec_())
