@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """dialogs.py - DialogsMixin (API kljuc, About, Podesavanja, Modeli)."""
 import json
-from PyQt5.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QInputDialog, QPushButton, QMessageBox, QTextEdit, QTabWidget, QFormLayout, QComboBox, QFrame, QWidget)
+from PyQt5.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QInputDialog, QPushButton, QMessageBox, QTextEdit, QTabWidget, QFormLayout, QComboBox, QFrame, QWidget, QGroupBox, QCheckBox)
 from PyQt5.QtCore import Qt, QUrl, QTimer, QEventLoop
 from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
@@ -214,7 +214,7 @@ class DialogsMixin:
         dlg = QDialog(self)
         dlg.setWindowTitle("⚙️ Podešavanja")
         dlg.setWindowIcon(get_deepseek_icon())
-        dlg.setFixedSize(500, 540)
+        dlg.setFixedSize(500, 790)
         
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -364,7 +364,72 @@ class DialogsMixin:
         form.addRow(lbl, self._settings_top_p)
         
         layout.addLayout(form)
-        
+
+        # ── 📬 Gmail – provera nepročitanih email-ova ─────────────────────
+        gmail_box = QGroupBox("📬 Gmail – provera nepročitanih email-ova")
+        gmail_box.setStyleSheet(
+            "QGroupBox { color: #e94560; font-weight: bold; border: 1px solid #0f3460;"
+            " border-radius: 6px; margin-top: 10px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
+        )
+        gmail_layout = QVBoxLayout(gmail_box)
+
+        self._settings_gmail_enabled = QCheckBox("Proveri nepročitane email-ove pre svake poruke")
+        self._settings_gmail_enabled.setChecked(settings.get("gmail_enabled", False))
+        self._settings_gmail_enabled.setStyleSheet("color: #e0e0e0; font-weight: normal;")
+        self._settings_gmail_enabled.setToolTip(
+            "Ako je uključeno, pre svake poruke aplikacija proverava Gmail.\n"
+            "Ako ima nepročitanih email-ova, AI PRVO odgovara na email pitanje,\n"
+            "pa onda nastavlja sa ostatkom zahteva."
+        )
+        gmail_layout.addWidget(self._settings_gmail_enabled)
+
+        gmail_form = QFormLayout()
+        gmail_form.setSpacing(6)
+
+        # Gmail adresa
+        self._settings_gmail_user = QLineEdit(settings.get("gmail_user", ""))
+        self._settings_gmail_user.setPlaceholderText("tvoj.mail@gmail.com")
+        self._settings_gmail_user.setStyleSheet("background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px; padding: 4px 8px;")
+        lbl = QLabel("Gmail adresa:")
+        lbl.setStyleSheet("color: #ccc;")
+        gmail_form.addRow(lbl, self._settings_gmail_user)
+
+        # App password
+        self._settings_gmail_pass = QLineEdit(settings.get("gmail_app_password", ""))
+        self._settings_gmail_pass.setEchoMode(QLineEdit.Password)
+        self._settings_gmail_pass.setPlaceholderText("16 znakova (xxxx xxxx xxxx xxxx)")
+        self._settings_gmail_pass.setStyleSheet("background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px; padding: 4px 8px;")
+        lbl = QLabel("App password:")
+        lbl.setStyleSheet("color: #ccc;")
+        lbl.setToolTip(
+            "Google nalog → Sigurnost → Verifikacija u 2 koraka → App passwords.\n"
+            "Obična lozinka NE radi – potreban je App Password (16 znakova)."
+        )
+        gmail_form.addRow(lbl, self._settings_gmail_pass)
+
+        # Opcioni search upit
+        self._settings_gmail_query = QLineEdit(settings.get("gmail_search_query", ""))
+        self._settings_gmail_query.setPlaceholderText('npr. from:sef@firma.rs  ili  subject:izvestaj')
+        self._settings_gmail_query.setStyleSheet("background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px; padding: 4px 8px;")
+        lbl = QLabel("Search upit (opciono):")
+        lbl.setStyleSheet("color: #ccc;")
+        lbl.setToolTip(
+            "Gmail web sintaksa, npr. 'from:sef@firma.rs' ili 'subject:izvestaj'.\n"
+            "Prazno = svi nepročitani email-ovi u Inbox-u."
+        )
+        gmail_form.addRow(lbl, self._settings_gmail_query)
+
+        gmail_layout.addLayout(gmail_form)
+
+        gmail_note = QLabel(
+            '<span style="color: #888; font-size: 10px;">'
+            '🔒 Lozinka se čuva lokalno u settings.json fajlu.</span>'
+        )
+        gmail_layout.addWidget(gmail_note)
+
+        layout.addWidget(gmail_box)
+
         layout.addStretch()
         
         # Info
@@ -398,6 +463,11 @@ class DialogsMixin:
             settings["streaming"] = self._settings_streaming.currentData()
             settings["temperature"] = self._settings_temp.currentData()
             settings["top_p"] = self._settings_top_p.currentData()
+            # 📬 Gmail
+            settings["gmail_enabled"] = self._settings_gmail_enabled.isChecked()
+            settings["gmail_user"] = self._settings_gmail_user.text().strip()
+            settings["gmail_app_password"] = self._settings_gmail_pass.text().strip()
+            settings["gmail_search_query"] = self._settings_gmail_query.text().strip()
             save_settings(settings)
             
             # Azuriraj globalne promenljive

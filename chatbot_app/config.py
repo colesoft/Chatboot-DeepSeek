@@ -114,6 +114,11 @@ DEFAULT_SETTINGS = {
     "temperature": 0.3,            # Kreativnost modela (0.0 - 2.0)
     "top_p": 0.9,                  # Top P sampling (0.0 - 1.0)
     "show_thinking": True,          # Prikaži "DeepSeek razmišlja..." pre odgovora
+    # 📬 Gmail – provera nepročitanih email-ova pre slanja
+    "gmail_enabled": False,        # Da li se proverava Gmail pre svake poruke
+    "gmail_user": "",              # Gmail adresa (npr. tvoj.mail@gmail.com)
+    "gmail_app_password": "",      # Google App Password (16 znakova) - NIJE obična lozinka!
+    "gmail_search_query": "",      # Opcioni Gmail search upit (from:, subject:, is:unread...)
 }
 
 

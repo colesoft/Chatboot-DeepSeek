@@ -133,7 +133,19 @@ def count_context_tokens(messages):
     total = 0
     for msg in messages:
         content = msg.get("content", "") or ""
-        total += estimate_tokens(content)
+        if isinstance(content, list):
+            # 🖼️ OpenAI-style content list (text + image_url delovi)
+            for part in content:
+                if isinstance(part, dict):
+                    if part.get("type") == "text":
+                        total += estimate_tokens(part.get("text", "") or "")
+                    elif part.get("type") == "image_url":
+                        # Slike se broje kao fiksan broj tokena (base64 se ne šalje u procenu)
+                        total += 1000
+                elif isinstance(part, str):
+                    total += estimate_tokens(part)
+        else:
+            total += estimate_tokens(content)
         # Tool callovi i rezultati takođe zauzimaju prostor
         tool_calls = msg.get("tool_calls")
         if tool_calls:
