@@ -204,7 +204,7 @@ class ProjectContextMixin:
         return summary
 
     def _choose_project_path(self):
-        """Bira projektni direktorijum."""
+        """Bira projektni direktorijum (nativni OS dijalog)."""
         path = QFileDialog.getExistingDirectory(
             self, "Izaberi projektni direktorijum",
             self.project_path

@@ -67,13 +67,14 @@ from chatbot_app.utils import (
     estimate_tokens, count_context_tokens, short_path,
 )
 from chatbot_app.tools import TOOLS_DEFINITIONS, ToolExecutor
-from chatbot_app.gmail import get_gmail_unread_count
 from chatbot_app.widgets import DiffDialog
+from chatbot_app.ocr import ocr_available, ocr_engine_name, extract_text_from_file, ocr_data_url_to_text
 from chatbot_app.api_client import validate_and_fix_messages
 from chatbot_app.pricing import (
     estimate_cost, format_cny, is_off_peak,
     get_max_tokens, cache_savings_pct,
 )
+from chatbot_app import models_catalog   # 🧬 katalog modela (effort/modalities/context)
 from chatbot_app.history import HistoryMixin
 from chatbot_app.ui.dialogs import DialogsMixin
 from chatbot_app.ui.project_context import ProjectContextMixin
@@ -81,17 +82,78 @@ from chatbot_app.logger import log, log_time
 
 
 # =============================================================================
+# ⏱️ TIMEOUTI (watchdog) - zaštita od "večnog razmišljanja"
+# =============================================================================
+# API (posebno u peak hours) ume da drži konekciju otvorenu bez ijednog bajta.
+# Bez ovih limita Qt čeka ZAUVEK: UI ostane zaključan, status vrti "⏳" minutima.
+CHAT_TIMEOUT_MS = 180_000        # 3 min - tvrdi limit po jednom API pozivu
+CHAT_SLOW_WARN_MS = 25_000       # 25 s - samo informativna poruka u statusu
+NET_TRANSFER_TIMEOUT_MS = 60_000 # mrežni timeout (nema prenosa 60s -> abort)
+AUX_TRANSFER_TIMEOUT_MS = 20_000 # /models i /balance - kratki zahtevi
+
+
+def _set_net_timeout(request, ms=NET_TRANSFER_TIMEOUT_MS):
+    """Postavlja mrežni transfer-timeout na QNetworkRequest (Qt >= 5.15).
+
+    Bezbedno radi i na starijim Qt verzijama (tada se preskače).
+    """
+    try:
+        request.setTransferTimeout(ms)
+    except Exception:
+        pass
+
+
+# =============================================================================
 # 👁️ VISION (slanje slika) - DeepSeek V4 0324 nativno podržava slike
 # =============================================================================
 def _resolve_vision_model():
-    """Vraća vision model za analizu slika (deepseek-v4-pro ako postoji)."""
-    for mid in ("deepseek-v4-pro", "deepseek-v4-flash"):
-        if mid in DEEPSEEK_MODELS or mid in DEEPSEEK_SUPPORTED_MODELS:
+    """Vraća vision model za analizu slika.
+
+    Novi /models endpoint vraća `input_modalities` - model koji sadrži
+    "image" je PRAVI vision model (npr. deepseek-flash). models_catalog
+    to normalizuje u polje "vision": true.
+    """
+    try:
+        mid = models_catalog.vision_model_id()
+        if mid:
             return mid
+    except Exception as e:
+        log(f"⚠️ models_catalog nedostupan: {e}")
     return DEFAULT_MODEL
 
 
+def _vision_actually_supported(model_id=None):
+    """Da li dati (ili VISION_MODEL) model ZAISTA prima slike?
+
+    Gleda `input_modalities` iz kataloga (models.json). Ako model nije u
+    katalogu -> False (ne rizikujemo 400 "unknown variant image_url").
+    """
+    mid = model_id or _vision_model_now()
+    try:
+        return models_catalog.supports_images(mid)
+    except Exception:
+        return False
+
+
+# ⚠️ VISION_MODEL je samo početna vrednost - katalog (models.json) se puni
+# tek posle /models poziva, pa uvek koristi _vision_model_now().
 VISION_MODEL = _resolve_vision_model()
+
+
+def _vision_model_now():
+    """Vision model u ovom trenutku (iz svežeg kataloga)."""
+    return _resolve_vision_model()
+
+
+def _messages_contain_images(msgs):
+    """Proverava da li bilo koja poruka sadrži image_url content (slike)."""
+    for m in msgs or []:
+        content = m.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    return True
+    return False
 
 
 # =============================================================================
@@ -184,6 +246,8 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         self._current_session_id = None  # 📜 ID trenutne sesije u history fajlu (za ažuriranje umesto dupliranja)
         self._pending_tool_results = []
         self.current_model = DEFAULT_MODEL
+        # 🧠 reasoning_effort: "auto" | "low" | "high" | "max" | "none"
+        self.reasoning_effort = _settings.get("reasoning_effort", "auto")
         self._drag_pos = None  # za pomeranje prozora
         self._is_maximized = False
         self.auto_apply = False  # ⚡ Auto-apply mode (bez pitanja za fajlove)
@@ -201,6 +265,12 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         self._show_thinking = _settings.get("show_thinking", True)  # Animacija razmišljanja
         self._thinking_timer = None
         self._thinking_frames = 0
+
+        # ⏱️ WATCHDOG: bez ovoga zahtev koji "visi" (API ne odgovara) blokira
+        # UI zauvek - status vrti "⏳ razmišljam" i po 5+ minuta bez odgovora.
+        self._chat_watchdog = None          # QTimer - ukupno trajanje zahteva
+        self._chat_watchdog_soft = None     # QTimer - "još čekam..." posle 25s
+        self._chat_started_at = 0.0
         self._balance_info = self._load_cached_balance()  # Učitaj keširani balans
         self._status_full_text = None  # 📏 Puni tekst statusa (za elidiranje pri resize)
         # 💰 Praćenje troškova sesije (pricing.py)
@@ -837,9 +907,9 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         """)
         row.addWidget(self.btn_thinking)
 
-        # 📋 Input polje sa podrškom za paste (Ctrl+V) i drag&drop slika
-        self.input_field = PasteLineEdit(self._on_image_pasted)
-        self.input_field.setPlaceholderText("Napiši šta treba uraditi... (Enter = pošalji, Ctrl+V = nalepi screenshot)")
+        # 📋 Input polje (samo tekst - DeepSeek API ne prihvata slike)
+        self.input_field = QLineEdit()
+        self.input_field.setPlaceholderText("Napiši šta treba uraditi... (Enter = pošalji)")
         self.input_field.setStyleSheet("""
             QLineEdit {
                 background-color: #16213e;
@@ -854,52 +924,8 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
                 border-color: #e94560;
             }
         """)
-        self.input_field.returnPressed.connect(self._on_send_or_stop)
+        self.input_field.returnPressed.connect(self._on_enter_pressed)
         row.addWidget(self.input_field)
-
-        # 📎 Slike dugme (DeepSeek V4 vision)
-        self.btn_image = QPushButton("📎")
-        self.btn_image.setToolTip("Dodaj sliku sa diska (V4 vision analizira slike)")
-        self.btn_image.setFixedWidth(36)
-        self.btn_image.setFixedHeight(32)
-        self.btn_image.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                color: #aaa;
-                border: 2px solid #3a3a5e;
-                border-radius: 8px;
-                padding: 0px;
-                font-size: 16px;
-            }
-            QPushButton:hover {
-                border-color: #e94560;
-                background: rgba(255,255,255,0.05);
-            }
-        """)
-        self.btn_image.clicked.connect(self._pick_images)
-        row.addWidget(self.btn_image)
-
-        # 📸 Screenshot dugme (snimi ekran posle 3s countdown-a)
-        self.btn_screenshot = QPushButton("📸")
-        self.btn_screenshot.setToolTip("Snimi screenshot ekrana (3s countdown - stigneš da prebaciš prozor)")
-        self.btn_screenshot.setFixedWidth(36)
-        self.btn_screenshot.setFixedHeight(32)
-        self.btn_screenshot.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                color: #aaa;
-                border: 2px solid #3a3a5e;
-                border-radius: 8px;
-                padding: 0px;
-                font-size: 16px;
-            }
-            QPushButton:hover {
-                border-color: #e94560;
-                background: rgba(255,255,255,0.05);
-            }
-        """)
-        self.btn_screenshot.clicked.connect(self._capture_screenshot)
-        row.addWidget(self.btn_screenshot)
 
         # 😊 Emoji dugme
         self.btn_emoji = QPushButton("😊")
@@ -951,14 +977,6 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         row.addWidget(self.send_btn)
 
         input_layout.addLayout(row)
-
-        # 🖼️ Traka sa odabranim slikama (thumbnail-i, pojavljuje se tek kad se izaberu slike)
-        self.thumb_strip = QWidget()
-        self.thumb_strip.setVisible(False)
-        self.thumb_layout = QHBoxLayout(self.thumb_strip)
-        self.thumb_layout.setContentsMargins(4, 2, 4, 2)
-        self.thumb_layout.setSpacing(8)
-        input_layout.insertWidget(1, self.thumb_strip)
 
         # Hint
         self.lbl_hint = QLabel("💡 Npr: 'pokaži main.cpp', 'popravi grešku', 'nađi QString', 'dodaj funkciju'")
@@ -1093,11 +1111,18 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         """Otvara dijalog za izbor slika i dodaje ih u listu čekanja."""
         if self._loop_active:
             return
+        # ⚠️ VAŽNO: DontUseNativeDialog - nativni Windows file dijalog (Common
+        # Item Dialog) u PyQt5 5.15.x + Qt 5.15.2 zna da SRUŠI aplikaciju
+        # (hard crash bez poruke) čim se otvori, posebno sa DPI skaliranjem
+        # na Windows 10/11. Qt-ov dijalog je stabilan i identično funkcionalan.
+        options = QFileDialog.Options()
+        options |= QFileDialog.DontUseNativeDialog
         files, _ = QFileDialog.getOpenFileNames(
             self,
             "Izaberi slike (DeepSeek V4 vision)",
             os.path.expanduser("~"),
             "Slike (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;Svi fajlovi (*.*)",
+            options=options,
         )
         if not files:
             return
@@ -1208,53 +1233,14 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             return ""
 
     def _refresh_thumbnails(self):
-        """Prikazuje thumbnail-e izabranih slika u traci ispod input polja."""
-        # Očisti traku
-        while self.thumb_layout.count():
-            item = self.thumb_layout.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
+        """🖼️ No-op - traka sa slikama je UKLONJENA iz UI-ja.
 
-        if not self._pending_images:
-            self.thumb_strip.setVisible(False)
-            return
-
-        for path in self._pending_images:
-            wrap = QWidget()
-            lay = QVBoxLayout(wrap)
-            lay.setContentsMargins(0, 0, 0, 0)
-            lay.setSpacing(0)
-
-            data_uri = self._thumb_data(path)
-            if not data_uri:
-                continue
-            lbl = QLabel()
-            lbl.setPixmap(QPixmap(data_uri))
-            lbl.setFixedSize(64, 64)
-            lbl.setStyleSheet("border: 1px solid #3a3a5e; border-radius: 6px;")
-            lbl.setToolTip(path)
-            lay.addWidget(lbl)
-
-            btn_x = QPushButton("✕")
-            btn_x.setFixedSize(16, 16)
-            btn_x.setStyleSheet("""
-                QPushButton {
-                    background: #e94560;
-                    color: white;
-                    border: none;
-                    border-radius: 8px;
-                    font-size: 9px;
-                    padding: 0px;
-                }
-                QPushButton:hover { background: #ff6b81; }
-            """)
-            btn_x.clicked.connect(lambda checked=False, p=path: self._remove_image(p))
-            lay.addWidget(btn_x, alignment=Qt.AlignCenter)
-
-            self.thumb_layout.addWidget(wrap)
-
-        self.thumb_strip.setVisible(True)
+        Ranije je prikazivala thumbnail-e izabranih slika (thumb_layout /
+        thumb_strip), ali ti widgeti više ne postoje u _build_ui().
+        Metoda se i dalje poziva iz _send_message() i drugih mesta, pa je
+        pretvorena u no-op da ne bi pucala (AttributeError: thumb_layout).
+        """
+        return
 
     def _reset_vision_state(self):
         """Vraća model label na korisnikov izbor posle vision (slika) zahteva."""
@@ -1270,30 +1256,74 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         else:
             self._send_message()
 
+    def _on_enter_pressed(self):
+        """ENTER u polju za unos.
+
+        ⚠️ NAMERNO ne prekida AI: dok AI radi, ENTER samo pokaže hint.
+        Prekid ide isključivo preko ⛔ STOP dugmeta (da se ne bi slučajno
+        prekinula petlja i izazvao pad pri brisanju aktivnog reply-ja).
+        """
+        if self._loop_active:
+            self.status_label.setText("⏳ AI radi… (klikni ⛔ STOP da prekineš)")
+            return
+        self._send_message()
+
+    def _abort_pending_replies(self, manager):
+        """Bezbedno prekida SVE QNetworkReply objekte vezane za dati manager.
+
+        Bez ovoga, brisanje managera sa aktivnim reply-jem (streaming) može
+        dovesti do pristupa oslobođenoj memoriji -> tihi crash.
+        """
+        try:
+            replies = manager.findChildren(QNetworkReply)
+        except Exception:
+            replies = []
+        for rep in replies:
+            try:
+                rep.disconnect()
+            except Exception:
+                pass
+            try:
+                rep.abort()
+            except Exception:
+                pass
+            try:
+                rep.deleteLater()
+            except Exception:
+                pass
+
     def _stop_ai_loop(self):
         """Hitno prekida AI petlju."""
+        log("⛔ STOP: korisnik prekida AI petlju")
         self._stop_requested = True
         self._loop_active = False
         self._stream_active = False  # Prekini streaming
-        
+        self._stop_chat_watchdog()   # ⏱️ ugasi watchdog tajmere
+
         # Abortuj streaming reply ako postoji
         if self._stream_reply:
             try:
                 self._stream_reply.abort()
-            except:
+            except Exception:
                 pass
             self._stream_reply = None
-        
+
         self._update_send_button(is_running=False)
         self._set_ui_enabled(True)
         self.status_label.setText("⛔ Prekinuto")
         self._stop_thinking_animation()
         self._stream_block_position = None
         self._append_message("error", "⛔ <b>STOP</b> - korisnik je prekinuo AI petlju.")
-        # Otkaži sve pending zahteve (novi manager)
-        self.manager.blockSignals(True)
+
+        # Otkaži sve pending zahteve: prvo abort reply-ja, pa novi manager
         old_manager = self.manager
-        self.manager = QNetworkAccessManager()
+        self._abort_pending_replies(old_manager)
+        try:
+            old_manager.blockSignals(True)
+            old_manager.finished.disconnect()
+        except Exception:
+            pass
+        self.manager = QNetworkAccessManager(self)
         self.manager.finished.connect(self._on_api_reply)
         old_manager.deleteLater()
 
@@ -1369,6 +1399,15 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         if not user_text:
             user_text = "Analiziraj priloženu sliku."
 
+        # 📎 Provera vision podrške PRE slanja (DeepSeek API prihvata samo tekst)
+        if images and not _vision_actually_supported():
+            # 👁️ Nijedan model nema "vision": true → DeepSeek API bi vratio 400.
+            # Rešenje: lokalni OCR - izvučemo tekst iz slike i pošaljemo ga
+            # kao običan tekst (radi na svim DeepSeek modelima).
+            log(f"🔍 Vision nije podržan ({VISION_MODEL}) - koristim OCR za slike")
+            self._send_with_ocr(images, user_text)
+            return
+
         # 📎 Dodaj slike u poruku (DeepSeek V4 vision - content list sa image_url)
         if images:
             content_parts = [{"type": "text", "text": user_text}]
@@ -1379,10 +1418,12 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
                 try:
                     with open(img_path, "rb") as f:
                         b64 = base64.b64encode(f.read()).decode("utf-8")
-                    content_parts.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{self._mime_for(img_path)};base64,{b64}"},
-                    })
+                    img_part = {"url": f"data:{self._mime_for(img_path)};base64,{b64}"}
+                    # 👁️ detail: "auto" | "low" | "high" (tokeni po slici)
+                    _detail = _settings.get("vision_detail", "auto")
+                    if _detail in ("low", "high", "auto"):
+                        img_part["detail"] = _detail
+                    content_parts.append({"type": "image_url", "image_url": img_part})
                 except Exception as e:
                     log(f"⚠️ Greška pri čitanju slike {img_path}: {e}")
             self.messages.append({"role": "user", "content": content_parts})
@@ -1427,120 +1468,99 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
 
         self._loop_active = True
         self._update_send_button(is_running=True)
-        self._check_gmail_before_send()
 
-    # -------------------------------------------------------------------------
-    # 📬 GMAIL PROVERA (nepročitani email-ovi pre slanja)
-    # -------------------------------------------------------------------------
-    def _check_gmail_before_send(self):
-        """Proverava Gmail nepročitane email-ove (u pozadini) pre poziva API-ja.
+        # 🚀 POŠALJI zahtev API-ju (poziv je ranije slučajno izgubljen - bez njega je app bio "mrtav")
+        self._call_api()
 
-        Ako je Gmail podešavanje uključeno i ima nepročitanih email-ova,
-        AI dobija instrukciju da PRVO odgovori na email pitanje,
-        pa onda nastavi sa ostatkom zahteva.
-        """
-        settings = load_settings()
-        enabled = settings.get("gmail_enabled", False)
-        user = (settings.get("gmail_user") or "").strip()
-        app_pwd = (settings.get("gmail_app_password") or "").strip()
-
-        # Ako Gmail nije konfigurisan - idi direktno na API
-        if not (enabled and user and app_pwd):
+    # =========================================================================
+    # 🔍 OCR - slanje slika kao TEKST (DeepSeek API ne prima slike)
+    # =========================================================================
+    def _send_with_ocr(self, images, user_text):
+        """DeepSeek API ne prihvata slike (nema vision modela) → izvučemo
+        tekst lokalno (OCR) u pozadinskom thread-u i pošaljemo kao tekst."""
+        engine = ocr_engine_name()
+        if not engine:
+            # Nema OCR engine-a - javi korisniku kako da ga omogući
+            self._append_message(
+                "error",
+                "⚠️ <b>Slike se ne mogu poslati ovim modelima</b> "
+                "(DeepSeek API prihvata samo tekst).<br>"
+                "💡 Instaliraj Windows OCR: <code>pip install winsdk</code> "
+                "pa ponovo probaj - tekst iz slike će biti automatski izvučen.<br>"
+                "Ili dodaj vision model u <code>models.json</code> sa "
+                "<code>\"vision\": true</code>.",
+            )
+            self.status_label.setText("⚠️ OCR nije dostupan - slike preskočene")
+            # Ipak pošalji čist tekst korisnika (ne gubimo poruku)
+            self.messages.append({"role": "user", "content": user_text})
+            self._append_message("user", self._escape_html(user_text))
+            self.input_field.clear()
+            self._pending_images = []
+            self._refresh_thumbnails()
+            self._using_vision = False
+            self._loop_active = True
+            self._update_send_button(is_running=True)
             self._call_api()
             return
 
-        self.status_label.setText("📬 Proveravam Gmail nepročitane email-ove...")
-
-        # Pozadinski thread - ne blokiramo UI
-        self._gmail_result = {"done": False, "count": -1}
-        result = self._gmail_result
-
-        def _worker():
-            try:
-                result["count"] = get_gmail_unread_count(
-                    user, app_pwd, settings.get("gmail_search_query", ""))
-            except Exception as e:
-                log(f"⚠️ Gmail provera greška: {e}")
-                result["count"] = -1
-            finally:
-                result["done"] = True
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-        self._gmail_poll_count = 0
-        if getattr(self, "_gmail_timer", None) is not None:
-            self._gmail_timer.stop()
-        self._gmail_timer = QTimer(self)
-        self._gmail_timer.timeout.connect(self._on_gmail_poll)
-        self._gmail_timer.start(200)
-
-    def _on_gmail_poll(self):
-        """Prati rezultat Gmail provere (200ms interval, max ~8s)."""
-        self._gmail_poll_count += 1
-        if self._gmail_result.get("done"):
-            self._gmail_timer.stop()
-            self._gmail_timer.deleteLater()
-            self._gmail_timer = None
-            self._gmail_continue()
-        elif self._gmail_poll_count > 40:  # 8 sekundi timeout
-            self._gmail_timer.stop()
-            self._gmail_timer.deleteLater()
-            self._gmail_timer = None
-            log("⚠️ Gmail provera predugo traje - nastavljam bez provere")
-            self.status_label.setText("⚠️ Gmail provera predugo traje - nastavljam...")
-            self._call_api()
-
-    def _gmail_continue(self):
-        """Nastavlja slanje - ubacuje email notu ako ima nepročitanih."""
-        count = self._gmail_result.get("count", -1)
-        settings = load_settings()
-        query = (settings.get("gmail_search_query") or "").strip()
-
-        if count > 0:
-            self._inject_gmail_notice(count, query)
-            self.status_label.setText(
-                f"📬 {count} nepročitanih email-ova – AI odgovara prvo na email pitanje")
-        elif count == 0:
-            self.status_label.setText(
-                "✅ Nema nepročitanih email-ova" + (f" ({query})" if query else ""))
-        else:
-            self.status_label.setText("⚠️ Gmail nedostupan – nastavljam bez provere")
-        self._call_api()
-
-    def _inject_gmail_notice(self, count, query):
-        """Ubacuje notu da AI prvo odgovori na email pitanje.
-
-        ⚠️ DeepSeek NE podržava dve uzastopne system poruke, pa:
-        - ako bi nota bila odmah posle postojeće system poruke (prva poruka u
-          sesiji), spaja se u korisničku poruku (NE u system prompt),
-        - inače se umeće kao zasebna system poruka PRE poslednje user poruke
-          (poslednja poruka ostaje user - API to najbolje prima).
-        """
-        notice = (
-            f"[📬 GMAIL] Imate {count} nepročitanih email-ova u Gmail-u"
-            + (f" (upit: {query})" if query else "")
-            + ". PRVO odgovori na pitanje korisnika koje se odnosi na te email-ove, "
-              "pa onda nastavi sa ostatkom zahteva."
+        # 🔍 OCR u pozadinskom thread-u (UI se ne zamrzava)
+        self._ocr_in_progress = True
+        self.status_label.setText("🔍 Izvlačim tekst iz slike (OCR)...")
+        thumbs = "".join(
+            f'<img src="{self._thumb_data(p)}" width="72" height="72" '
+            f'style="border-radius:6px; border:1px solid #3a3a5e; margin:3px;">'
+            for p in images if os.path.exists(p)
         )
+        self._append_message(
+            "user",
+            self._escape_html(user_text) + "<br>" + thumbs +
+            '<br><span style="color:#8a8ab0; font-size:11px;">'
+            '🔍 Izvlačim tekst iz slike (OCR)...</span>',
+        )
+        self.input_field.clear()
+        self._pending_images = []
+        self._refresh_thumbnails()
 
-        if self.messages and self.messages[-1].get("role") == "user":
-            idx = len(self.messages) - 1
-            if idx > 0 and self.messages[idx - 1].get("role") == "system":
-                # Prva poruka u sesiji - spoji notu u user poruku
-                user_msg = self.messages[idx]
-                content = user_msg.get("content", "")
-                if isinstance(content, list):
-                    content = list(content) + [{"type": "text", "text": "\n\n" + notice}]
-                elif isinstance(content, str):
-                    content = content + "\n\n" + notice
-                else:
-                    content = notice
-                user_msg["content"] = content
-            else:
-                self.messages.insert(idx, {"role": "system", "content": notice})
+        def worker():
+            results = []
+            for p in images:
+                text, eng = extract_text_from_file(p)
+                results.append((p, text, eng))
+            # Vrati se u glavni (Qt) thread
+            QTimer.singleShot(0, lambda: self._finish_send_with_ocr(user_text, results))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_send_with_ocr(self, user_text, results):
+        """Poziva se iz glavnog thread-a nakon što OCR završi."""
+        self._ocr_in_progress = False
+        extracted = [(p, t, e) for p, t, e in results if t]
+        if extracted:
+            ocr_block = "\n\n".join(
+                f"[📎 Tekst iz slike {i+1} (OCR: {e})]\n{t}"
+                for i, (_, t, e) in enumerate(extracted)
+            )
+            final_text = user_text + "\n\n" + ocr_block
+            engine_names = sorted({e for _, _, e in extracted})
+            self._append_message(
+                "info",
+                f"🔍 <b>Tekst iz slike izvučen</b> (OCR: {', '.join(engine_names)}) - "
+                "poslat DeepSeek-u kao tekst.",
+            )
         else:
-            # Fallback (retko) - dodaj kao system poruku na kraj
-            self.messages.append({"role": "system", "content": notice})
+            # OCR nije našao tekst - pošalji samo korisnikov tekst
+            final_text = user_text
+            self._append_message(
+                "error",
+                "⚠️ OCR nije pronašao tekst u slici - poslat je samo "
+                "tekstualni deo poruke.",
+            )
+        self.messages.append({"role": "user", "content": final_text})
+        self._using_vision = False
+        self.status_label.setText("⏳ Razmišljam...")
+        self._loop_active = True
+        self._update_send_button(is_running=True)
+        self._call_api()
 
     def _summarize_history(self):
         """Sažima istoriju ako je previše narasla.
@@ -2018,6 +2038,93 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         """Oslobađa API gate."""
         self._api_gate_busy = False
 
+    # -------------------------------------------------------------------------
+    # ⏱️ WATCHDOG - zaštita od "večnog razmišljanja" (API ne odgovara)
+    # -------------------------------------------------------------------------
+    def _start_chat_watchdog(self):
+        """Pokreće tajmere koji prekidaju zahtev ako API ne odgovori."""
+        self._stop_chat_watchdog()
+        self._chat_started_at = time.time()
+
+        # Meki tajmer: posle 25s samo obavesti korisnika (ne prekida)
+        self._chat_watchdog_soft = QTimer(self)
+        self._chat_watchdog_soft.setSingleShot(True)
+        self._chat_watchdog_soft.timeout.connect(self._on_chat_slow)
+        self._chat_watchdog_soft.start(CHAT_SLOW_WARN_MS)
+
+        # Tvrđi tajmer: posle CHAT_TIMEOUT_MS prekida zahtev
+        self._chat_watchdog = QTimer(self)
+        self._chat_watchdog.setSingleShot(True)
+        self._chat_watchdog.timeout.connect(self._on_chat_timeout)
+        self._chat_watchdog.start(CHAT_TIMEOUT_MS)
+
+    def _stop_chat_watchdog(self):
+        """Gasi watchdog tajmere (zahtev je završen/prekinut)."""
+        for attr in ("_chat_watchdog_soft", "_chat_watchdog"):
+            t = getattr(self, attr, None)
+            if t is not None:
+                try:
+                    t.stop()
+                    t.deleteLater()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+    def _on_chat_slow(self):
+        """API još ne odgovara - prikaži realno stanje umesto večitog ⏳."""
+        if not self._loop_active:
+            return
+        secs = int(time.time() - self._chat_started_at)
+        self.status_label.setText(
+            f"⏳ API još ne odgovara… ({secs}s) — možeš kliknuti ⛔ STOP")
+        log(f"⏱️ Watchdog: API ne odgovara {secs}s (soft warn)")
+
+    def _on_chat_timeout(self):
+        """⏱️ Zahtev je predugo otvoren - prekini ga i objasni korisniku."""
+        secs = int(time.time() - self._chat_started_at)
+        log(f"⏱️ TIMEOUT: nema odgovora {secs}s - prekidam zahtev")
+
+        # 1) Ubij mrežni zahtev (ako postoji)
+        rep = self._stream_reply
+        self._stream_reply = None
+        self._stream_active = False
+        if rep is not None:
+            try:
+                rep.disconnect()
+            except Exception:
+                pass
+            try:
+                rep.abort()
+            except Exception:
+                pass
+            try:
+                rep.deleteLater()
+            except Exception:
+                pass
+
+        # 2) Očisti stanje
+        self._stop_chat_watchdog()
+        self._api_gate_release()
+        self._stop_thinking_animation()
+        self._remove_thinking_placeholder()
+        self._loop_active = False
+        self._stop_requested = False
+        self._stream_was_active = False
+        self._tool_call_count = 0
+
+        # 3) Vrati UI
+        self._update_send_button(is_running=False)
+        self._set_ui_enabled(True)
+        self.status_label.setText(f"⏱️ Timeout — API nije odgovorio {secs}s")
+
+        self._append_message(
+            "error",
+            f"⏱️ <b>Zahtev je prekinut posle {secs}s bez odgovora.</b><br>"
+            f"Mogući uzroci: API je preopterećen (peak hours), internet veza je "
+            f"prekinuta ili je model zaglavio.<br>"
+            f"➡️ Pokušaj ponovo (možda sa kraćom porukom ili manjim modelom).")
+
+
     def fetch_models_from_api(self):
         """Dohvata listu dostupnih modela sa DeepSeek API-ja."""
         log("🔃 fetch_models_from_api() - krece")
@@ -2038,12 +2145,13 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             request = QNetworkRequest(url)
             request.setRawHeader(b"Authorization", f"Bearer {self.api_key}".encode("utf-8"))
             request.setHeader(QNetworkRequest.ContentTypeHeader, "application/json")
+            _set_net_timeout(request, AUX_TRANSFER_TIMEOUT_MS)  # kratki zahtevi
             
             reply = self.api_manager.get(request)
             reply.finished.connect(lambda: self._on_models_api_reply(reply))
         except Exception as e:
             print(f"[DeepSeek] Greška pri dohvatanju modela: {e}")
-            self._apply_models(FALLBACK_MODELS)
+            self._apply_models(self._models_or_fallback())
     
     def _on_models_api_reply(self, reply):
         """Obradjuje odgovor od /models API-ja."""
@@ -2054,7 +2162,7 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
                 err_msg = reply.errorString()
                 print(f"[DeepSeek] Greška pri dohvatanju modela: {err_msg}")
                 print("[DeepSeek] Koristim fallback modele")
-                self._apply_models(FALLBACK_MODELS)
+                self._apply_models(self._models_or_fallback())
                 self.status_label.setText("✅ Učitani lokalni modeli (API nema list-models)")
                 reply.deleteLater()
                 return
@@ -2066,7 +2174,7 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             models_data = data.get("data", [])
             if not models_data:
                 print("[DeepSeek] API nije vratio modele, koristim fallback")
-                self._apply_models(FALLBACK_MODELS)
+                self._apply_models(self._models_or_fallback())
                 self.status_label.setText("✅ Učitani lokalni modeli (API prazan)")
                 reply.deleteLater()
                 return
@@ -2089,11 +2197,22 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
                 if not model_id.startswith("deepseek"):
                     continue
                 name = known_names.get(model_id, model_id.replace("-", " ").title())
-                new_models.append({"id": model_id, "name": name})
+                entry = {"id": model_id, "name": name}
+                # 🧬 Sačuvaj sva dodatna polja iz /models (input_modalities,
+                # context_window, max_output_tokens, ...) - models_catalog
+                # iz njih izvodi "vision", "reasoning_effort", "context"
+                for key in ("input_modalities", "output_modalities",
+                            "context_window", "max_context_length",
+                            "max_output_tokens", "max_tokens",
+                            "supports_reasoning", "reasoning", "owned_by",
+                            "description"):
+                    if key in m:
+                        entry[key] = m[key]
+                new_models.append(entry)
             
             if not new_models:
                 print("[DeepSeek] API nema DeepSeek modela, koristim fallback")
-                self._apply_models(FALLBACK_MODELS)
+                self._apply_models(self._models_or_fallback())
                 self.status_label.setText("✅ Učitani lokalni modeli (API nema DeepSeek modela)")
                 reply.deleteLater()
                 return
@@ -2109,7 +2228,7 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         except Exception as e:
             print(f"[DeepSeek] Greška pri parsiranju modela: {e}")
             print("[DeepSeek] Koristim fallback modele")
-            self._apply_models(FALLBACK_MODELS)
+            self._apply_models(self._models_or_fallback())
             self.status_label.setText("✅ Učitani lokalni modeli (greška API-ja)")
         
         try:
@@ -2117,6 +2236,21 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         except:
             pass
     
+    def _models_or_fallback(self):
+        """Vraća sačuvane modele iz models.json (sa modalities/context).
+
+        Fallback listu koristimo SAMO ako lokalni config ne postoji - inače
+        bismo pri svakom neuspešnom /models pozivu pregazili katalog i izgubili
+        input_modalities (=> vision bi prestao da radi).
+        """
+        try:
+            saved = load_models_config()
+            if saved:
+                return saved
+        except Exception as e:
+            log(f"⚠️ _models_or_fallback: {e}")
+        return FALLBACK_MODELS
+
     def _apply_models(self, models):
         """Primenjuje listu modela na combo box i globalne promenljive."""
         global DEEPSEEK_MODELS, DEFAULT_MODEL
@@ -2132,6 +2266,16 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         
         # Sačuvaj u fajl
         save_models_config(models)
+
+        # 🧬 models_catalog: normalizuj i sačuvaj modalities/context/effort
+        # (input_modalities -> "vision", context_window, reasoning_effort)
+        try:
+            normalized = [models_catalog.normalize_model(m) for m in models]
+            models_catalog.save_models_config(normalized)
+            log(f"🧬 Katalog ažuriran: {len(normalized)} modela, "
+                f"vision={[m['id'] for m in normalized if m.get('vision')]}")
+        except Exception as e:
+            log(f"⚠️ models_catalog update: {e}")
         
         # Ažuriraj globalne
         DEEPSEEK_MODELS = {m["id"]: m["name"] for m in models}
@@ -2188,6 +2332,7 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             request = QNetworkRequest(url)
             request.setRawHeader(b"Authorization", f"Bearer {self.api_key}".encode("utf-8"))
             request.setHeader(QNetworkRequest.ContentTypeHeader, "application/json")
+            _set_net_timeout(request, AUX_TRANSFER_TIMEOUT_MS)  # kratki zahtevi
             
             reply = self.api_manager.get(request)
             reply.finished.connect(lambda: self._on_balance_api_reply(reply))
@@ -2488,6 +2633,67 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         return cost
 
     # =========================================================================
+    # 👁️ VISION FALLBACK (model ne podržava slike)
+    # =========================================================================
+    def _handle_vision_unsupported(self):
+        """DeepSeek API je odbio image_url - model ne podržava slike.
+
+        Pokušava OCR na slikama (izvuče tekst), pa šalje čist tekst.
+        Ako OCR nije moguć, uklanja slike i šalje tekstualni deo.
+        Sprečava 400 "unknown variant `image_url`, expected `text`".
+        """
+        self._using_vision = False
+        stripped = 0
+        ocr_parts = []
+        for msg in self.messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                text_parts = [
+                    p.get("text", "")
+                    for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                ]
+                text = " ".join(text_parts).strip()
+                # 🔍 Pokušaj OCR na slikama iz poruke
+                for p in content:
+                    if isinstance(p, dict) and p.get("type") == "image_url":
+                        url = (p.get("image_url") or {}).get("url", "")
+                        if url.startswith("data:"):
+                            try:
+                                ocr_text, eng = ocr_data_url_to_text(url)
+                                if ocr_text:
+                                    ocr_parts.append(f"[📎 Tekst iz slike (OCR: {eng})]\n{ocr_text}")
+                            except Exception as e:
+                                log(f"⚠️ OCR greška u fallback-u: {e}")
+                msg["content"] = text or "[Slika uklonjena - model je ne podržava]"
+                stripped += 1
+        log(f"⚠️ Vision nije podržan - uklonjeno {stripped} poruka sa slikama, OCR delova: {len(ocr_parts)}")
+        if stripped:
+            if ocr_parts:
+                # ✅ OCR je uspeo - dodaj izvučeni tekst u poslednju korisničku poruku
+                ocr_block = "\n\n" + "\n\n".join(ocr_parts)
+                for msg in reversed(self.messages):
+                    if msg.get("role") == "user":
+                        msg["content"] = str(msg.get("content", "")) + ocr_block
+                        break
+                self._append_message(
+                    "error",
+                    "⚠️ <b>Model ne podržava slike</b> - tekst je izvučen OCR-om "
+                    "i poslat kao tekst.",
+                )
+            else:
+                self._append_message(
+                    "error",
+                    "⚠️ <b>Trenutni model ne podržava slike</b> (image_url). "
+                    "Slike su uklonjene iz poruke - odgovaram na tekstualni deo.",
+                )
+            self.status_label.setText("⚠️ Model ne podržava slike - šaljem bez slika")
+            # 🔄 Pokušaj ponovo sa čistim tekstom (slike su uklonjene - nema petlje)
+            QTimer.singleShot(300, lambda: self._call_api(messages_override=self.messages))
+            return True
+        return False
+
+    # =========================================================================
     # 📡 API POZIV
     # =========================================================================
     def _call_api(self, messages_override=None):
@@ -2556,9 +2762,16 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         # 🚀 DeepSeek API ne podržava "required" tool_choice
         # Uvek koristimo "auto" da izbegnemo grešku
         tool_choice = "auto"
-        
+
+        # 👁️ VISION: ako poruka sadrži slike (image_url), pošalji na vision model!
+        # (Inače API vraća: "unknown variant `image_url`, expected `text`")
+        model_to_use = self.current_model
+        if self._using_vision or _messages_contain_images(msgs):
+            model_to_use = _vision_model_now()
+            log(f"👁️ Vision zahtev → model: {model_to_use} (umesto {self.current_model})")
+
         payload = {
-            "model": self.current_model,
+            "model": model_to_use,
             "messages": msgs,
             "tools": TOOLS_DEFINITIONS,
             "tool_choice": tool_choice,
@@ -2568,8 +2781,16 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             # sav limit na razmišljanje (reasoning_content) pa vrati finish_reason="length"
             # sa praznim content-om i bez tool_calls.
             # 💰 max_tokens po modelu: deepseek-v4-* → 32768, stari (V3.2-Exp) → 8192
-            "max_tokens": get_max_tokens(self.current_model),
+            "max_tokens": get_max_tokens(model_to_use),
         }
+
+        # 🧠 reasoning_effort - samo za modele koji ga podržavaju
+        # (models.json / input_modalities); "none" = isključeno razmišljanje
+        effort = models_catalog.resolve_effort(
+            model_to_use, getattr(self, "reasoning_effort", "auto"))
+        if effort:
+            payload["reasoning_effort"] = effort
+            log(f"🧠 reasoning_effort={effort} ({model_to_use})")
         
         # 📡 Dodaj streaming ako je omogućen i nismo u tool petlji
         if use_streaming and tool_choice == "auto":
@@ -2579,9 +2800,13 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
         request = QNetworkRequest(url)
         request.setHeader(QNetworkRequest.ContentTypeHeader, "application/json")
         request.setRawHeader(b"Authorization", f"Bearer {self.api_key}".encode("utf-8"))
+        _set_net_timeout(request)
 
         json_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        
+
+        # ⏱️ Watchdog PRE slanja: ako API ne odgovori, zahtev se sam prekida
+        self._start_chat_watchdog()
+
         if use_streaming and tool_choice == "auto":
             # 📡 Streaming zahtev
             self._stream_was_active = True  # ⛔ Spriječi _on_api_reply da obradi ovaj reply
@@ -2657,6 +2882,7 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             return
         
         self._stream_active = False
+        self._stop_chat_watchdog()   # ⏱️ zahtev je završen - ugasi watchdog
         # ⛔ Streaming zahtev je završen - oslobodi API gate
         self._api_gate_release()
         self._stop_thinking_animation()
@@ -2720,6 +2946,7 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
 
         # ⛔ Chat API zahtev je završen (uspeh ili greška) - oslobodi API gate
         self._api_gate_release()
+        self._stop_chat_watchdog()   # ⏱️ odgovor je stigao - ugasi watchdog
 
         log("🟢 _on_api_reply() - stigao odgovor")
         # Ukloni "razmišljam..."
@@ -2743,6 +2970,14 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
                         error_detail = str(err)
             except:
                 error_detail = body[:500] if body else ""
+
+            # 👁️ VISION fallback: ako API ne prepozna image_url (model bez
+            # podrške za slike), ukloni slike i pošalji samo tekst umesto
+            # grube 400 greške: "unknown variant `image_url`, expected `text`"
+            if ("unknown variant" in error_detail.lower()
+                    and "image_url" in error_detail.lower()):
+                if self._handle_vision_unsupported():
+                    return
 
             # Mapa DeepSeek error kodova
             error_map = {
@@ -2927,7 +3162,9 @@ class ChatWindow(QMainWindow, HistoryMixin, DialogsMixin, ProjectContextMixin):
             self._set_ui_enabled(True)
             self._loop_active = False
             self._stop_thinking_animation()
-            
+            # 👁️ Vraća model label na korisnikov izbor posle vision (slika) zahteva
+            self._reset_vision_state()
+
             # 💰 Osveži balans posle svake poruke
             QTimer.singleShot(500, self.fetch_user_balance)
 

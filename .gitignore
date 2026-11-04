@@ -54,3 +54,7 @@ _scan*.py
 _scan*.txt
 _diff.txt
 test_balance_api*.py
+_grep*.py
+_patch*.py
+_show*.py
+_test*.py

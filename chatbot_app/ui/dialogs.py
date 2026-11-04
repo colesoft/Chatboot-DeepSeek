@@ -214,7 +214,7 @@ class DialogsMixin:
         dlg = QDialog(self)
         dlg.setWindowTitle("⚙️ Podešavanja")
         dlg.setWindowIcon(get_deepseek_icon())
-        dlg.setFixedSize(500, 790)
+        dlg.setFixedSize(520, 900)
         
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -241,6 +241,48 @@ class DialogsMixin:
         lbl.setStyleSheet("color: #ccc;")
         lbl.setToolTip("Koliko alata (read, create, edit...) AI sme da pozove pre nego što se prinudno zaustavi")
         form.addRow(lbl, self._settings_tool_calls)
+
+        # 🧠 reasoning_effort (thinking mode)
+        self._settings_effort = QComboBox()
+        for val, text in [("auto", "Auto (default iz /models)"),
+                          ("low", "Low - brzo, malo razmišljanja"),
+                          ("high", "High - detaljnije"),
+                          ("max", "Max - najdublje (sporo)"),
+                          ("none", "Off - bez razmišljanja")]:
+            self._settings_effort.addItem(text, val)
+        idx = self._settings_effort.findData(settings.get("reasoning_effort", "auto"))
+        if idx >= 0:
+            self._settings_effort.setCurrentIndex(idx)
+        self._settings_effort.setStyleSheet("background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px; padding: 4px 8px;")
+        lbl = QLabel("🧠 Reasoning effort:")
+        lbl.setStyleSheet("color: #ccc;")
+        lbl.setToolTip("Koliko duboko model razmišlja pre odgovora (reasoning_effort).\n"
+                       "Šalje se samo modelima koji to podržavaju (vidi /models).")
+        form.addRow(lbl, self._settings_effort)
+
+        # 👁️ vision_detail
+        self._settings_vision_detail = QComboBox()
+        for val, text in [("auto", "Auto"), ("low", "Low (manje tokena)"),
+                          ("high", "High (detaljnije)")]:
+            self._settings_vision_detail.addItem(text, val)
+        idx = self._settings_vision_detail.findData(settings.get("vision_detail", "auto"))
+        if idx >= 0:
+            self._settings_vision_detail.setCurrentIndex(idx)
+        self._settings_vision_detail.setStyleSheet("background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px; padding: 4px 8px;")
+        lbl = QLabel("👁️ Detalj slike:")
+        lbl.setStyleSheet("color: #ccc;")
+        lbl.setToolTip("Koliko detaljno se analizira priložena slika (image_url.detail)")
+        form.addRow(lbl, self._settings_vision_detail)
+
+        # 🌐 Web alati
+        self._settings_web_search = QCheckBox("Dozvoli web_search (pretraga)")
+        self._settings_web_search.setChecked(bool(settings.get("web_search_enabled", True)))
+        self._settings_web_search.setStyleSheet("color: #ccc;")
+        self._settings_web_fetch = QCheckBox("Dozvoli web_fetch (čitanje stranica)")
+        self._settings_web_fetch.setChecked(bool(settings.get("web_fetch_enabled", True)))
+        self._settings_web_fetch.setStyleSheet("color: #ccc;")
+        form.addRow(QLabel("🌐 Web alati:"), self._settings_web_search)
+        form.addRow(QLabel(""), self._settings_web_fetch)
         
         # Max files auto-apply
         self._settings_max_files = QComboBox()
@@ -364,72 +406,6 @@ class DialogsMixin:
         form.addRow(lbl, self._settings_top_p)
         
         layout.addLayout(form)
-
-        # ── 📬 Gmail – provera nepročitanih email-ova ─────────────────────
-        gmail_box = QGroupBox("📬 Gmail – provera nepročitanih email-ova")
-        gmail_box.setStyleSheet(
-            "QGroupBox { color: #e94560; font-weight: bold; border: 1px solid #0f3460;"
-            " border-radius: 6px; margin-top: 10px; }"
-            "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
-        )
-        gmail_layout = QVBoxLayout(gmail_box)
-
-        self._settings_gmail_enabled = QCheckBox("Proveri nepročitane email-ove pre svake poruke")
-        self._settings_gmail_enabled.setChecked(settings.get("gmail_enabled", False))
-        self._settings_gmail_enabled.setStyleSheet("color: #e0e0e0; font-weight: normal;")
-        self._settings_gmail_enabled.setToolTip(
-            "Ako je uključeno, pre svake poruke aplikacija proverava Gmail.\n"
-            "Ako ima nepročitanih email-ova, AI PRVO odgovara na email pitanje,\n"
-            "pa onda nastavlja sa ostatkom zahteva."
-        )
-        gmail_layout.addWidget(self._settings_gmail_enabled)
-
-        gmail_form = QFormLayout()
-        gmail_form.setSpacing(6)
-
-        # Gmail adresa
-        self._settings_gmail_user = QLineEdit(settings.get("gmail_user", ""))
-        self._settings_gmail_user.setPlaceholderText("tvoj.mail@gmail.com")
-        self._settings_gmail_user.setStyleSheet("background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px; padding: 4px 8px;")
-        lbl = QLabel("Gmail adresa:")
-        lbl.setStyleSheet("color: #ccc;")
-        gmail_form.addRow(lbl, self._settings_gmail_user)
-
-        # App password
-        self._settings_gmail_pass = QLineEdit(settings.get("gmail_app_password", ""))
-        self._settings_gmail_pass.setEchoMode(QLineEdit.Password)
-        self._settings_gmail_pass.setPlaceholderText("16 znakova (xxxx xxxx xxxx xxxx)")
-        self._settings_gmail_pass.setStyleSheet("background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px; padding: 4px 8px;")
-        lbl = QLabel("App password:")
-        lbl.setStyleSheet("color: #ccc;")
-        lbl.setToolTip(
-            "Google nalog → Sigurnost → Verifikacija u 2 koraka → App passwords.\n"
-            "Obična lozinka NE radi – potreban je App Password (16 znakova)."
-        )
-        gmail_form.addRow(lbl, self._settings_gmail_pass)
-
-        # Opcioni search upit
-        self._settings_gmail_query = QLineEdit(settings.get("gmail_search_query", ""))
-        self._settings_gmail_query.setPlaceholderText('npr. from:sef@firma.rs  ili  subject:izvestaj')
-        self._settings_gmail_query.setStyleSheet("background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px; padding: 4px 8px;")
-        lbl = QLabel("Search upit (opciono):")
-        lbl.setStyleSheet("color: #ccc;")
-        lbl.setToolTip(
-            "Gmail web sintaksa, npr. 'from:sef@firma.rs' ili 'subject:izvestaj'.\n"
-            "Prazno = svi nepročitani email-ovi u Inbox-u."
-        )
-        gmail_form.addRow(lbl, self._settings_gmail_query)
-
-        gmail_layout.addLayout(gmail_form)
-
-        gmail_note = QLabel(
-            '<span style="color: #888; font-size: 10px;">'
-            '🔒 Lozinka se čuva lokalno u settings.json fajlu.</span>'
-        )
-        gmail_layout.addWidget(gmail_note)
-
-        layout.addWidget(gmail_box)
-
         layout.addStretch()
         
         # Info
@@ -463,12 +439,24 @@ class DialogsMixin:
             settings["streaming"] = self._settings_streaming.currentData()
             settings["temperature"] = self._settings_temp.currentData()
             settings["top_p"] = self._settings_top_p.currentData()
-            # 📬 Gmail
-            settings["gmail_enabled"] = self._settings_gmail_enabled.isChecked()
-            settings["gmail_user"] = self._settings_gmail_user.text().strip()
-            settings["gmail_app_password"] = self._settings_gmail_pass.text().strip()
-            settings["gmail_search_query"] = self._settings_gmail_query.text().strip()
+            # 🧠 / 👁️ / 🌐 novi model parametri
+            settings["reasoning_effort"] = self._settings_effort.currentData()
+            settings["vision_detail"] = self._settings_vision_detail.currentData()
+            settings["web_search_enabled"] = self._settings_web_search.isChecked()
+            settings["web_fetch_enabled"] = self._settings_web_fetch.isChecked()
+
             save_settings(settings)
+
+            # 🧠 primeni reasoning_effort odmah (bez restarta)
+            self.reasoning_effort = settings["reasoning_effort"]
+
+            # 🌐 osveži listu web alata prema novim toggle-ima
+            try:
+                from ..tools import refresh_web_tools
+                names = refresh_web_tools()
+                log(f"🌐 Aktivni alati posle podešavanja: {names}")
+            except Exception as e:
+                log(f"⚠️ refresh_web_tools: {e}")
             
             # Azuriraj globalne promenljive
             global MAX_TOOL_CALLS, MAX_FILES_PER_SESSION, MAX_HISTORY_TOKENS, MAX_CONTEXT_TOKENS, KEEP_MESSAGES_ON_SUMMARY, MAX_SESSION_HISTORY, PATTERN_DETECT_LIMIT, STREAMING_ENABLED, TEMPERATURE, TOP_P

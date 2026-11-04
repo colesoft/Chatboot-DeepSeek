@@ -20,11 +20,38 @@ from PyQt5.QtGui import (
 )
 
 from chatbot_app.config import IS_WINDOWS, FONT_NAME
+from chatbot_app.logger import install_crash_handlers
 from chatbot_app.utils import get_deepseek_icon
 from deepseek_chatbot import ChatWindow
 
 
+def hide_console():
+    """Sakrij crni konzolni prozor na Windows-u (ostaje samo GUI prozor).
+
+    Konzola se NE zatvara, samo se skloni sa ekrana/taskbara - stdout ostaje
+    validan, pa print() i traceback i dalje rade (u prazno, ili u log fajl).
+    Za debug:  set DEEPSEEK_SHOW_CONSOLE=1  pre pokretanja.
+    """
+    if not IS_WINDOWS:
+        return
+    if os.environ.get("DEEPSEEK_SHOW_CONSOLE", "") == "1":
+        return
+    try:
+        import ctypes
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)  # 0 = SW_HIDE
+    except Exception:
+        pass  # nema konzole (pythonw / PyInstaller windowed) - ništa ne treba
+
+
 def main():
+    # Sakrij konzolu pre bilo kog prozora (splash se prikazuje čist)
+    hide_console()
+
+    # 💥 OBAVEZNO prvo: hvata traceback umesto tihog rušenja (PyQt5 abort)
+    install_crash_handlers()
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     

@@ -16,6 +16,27 @@ import traceback
 from .utils import is_within_project
 from .logger import log
 
+# 🌐 Web alati (novi /v1/tools/search i /v1/tools/fetch endpointi)
+try:
+    from .api_tools import (
+        TOOL_SCHEMAS as _WEB_SCHEMAS,
+        run_tool as _run_web_tool,
+    )
+except Exception as _e:  # pragma: no cover - api_tools bi trebalo da postoji
+    _WEB_SCHEMAS = []
+    _run_web_tool = None
+    log(f"⚠️ Web alati nedostupni: {_e}")
+
+try:
+    from . import config as _cfg
+    WEB_SEARCH_ENABLED = getattr(_cfg, "WEB_SEARCH_ENABLED", True)
+    WEB_FETCH_ENABLED = getattr(_cfg, "WEB_FETCH_ENABLED", True)
+    WEB_SEARCH_COUNT = getattr(_cfg, "WEB_SEARCH_COUNT", 10)
+except Exception:
+    WEB_SEARCH_ENABLED = True
+    WEB_FETCH_ENABLED = True
+    WEB_SEARCH_COUNT = 10
+
 # =============================================================================
 # DEFINICIJA ALATA (TOOLS) ZA DEEPSEEK API
 # =============================================================================
@@ -168,6 +189,47 @@ TOOLS_DEFINITIONS = [
         }
     }
 ]
+
+
+def _filtered_web_schemas():
+    """Web šeme poštuju korisnikova podešavanja (uključeno/isključeno)."""
+    allowed = set()
+    if WEB_SEARCH_ENABLED:
+        allowed.add("web_search")
+    if WEB_FETCH_ENABLED:
+        allowed.add("web_fetch")
+    return [s for s in _WEB_SCHEMAS
+            if s.get("function", {}).get("name") in allowed]
+
+
+# 🌐 Dodaj web alate u glavnu listu (samo ako su dostupni i uključeni)
+TOOLS_DEFINITIONS.extend(_filtered_web_schemas())
+
+_WEB_TOOL_NAMES = ("web_search", "web_fetch")
+
+
+def refresh_web_tools():
+    """Ponovo izračuna TOOLS_DEFINITIONS prema settings.json (bez restarta).
+
+    Menja listu IN-PLACE da bi reference (deepseek_chatbot.TOOLS_DEFINITIONS)
+    ostale važeće.
+    """
+    global WEB_SEARCH_ENABLED, WEB_FETCH_ENABLED, WEB_SEARCH_COUNT
+    try:
+        _s = _cfg.load_settings()
+        WEB_SEARCH_ENABLED = bool(_s.get("web_search_enabled", True))
+        WEB_FETCH_ENABLED = bool(_s.get("web_fetch_enabled", True))
+        WEB_SEARCH_COUNT = int(_s.get("web_search_count", 10) or 10)
+    except Exception as e:
+        log(f"⚠️ refresh_web_tools: {e}")
+    base = [t for t in TOOLS_DEFINITIONS
+            if t.get("function", {}).get("name") not in _WEB_TOOL_NAMES]
+    base.extend(_filtered_web_schemas())
+    TOOLS_DEFINITIONS[:] = base
+    log(f"🌐 Web alati: search={WEB_SEARCH_ENABLED}, "
+        f"fetch={WEB_FETCH_ENABLED}, count={WEB_SEARCH_COUNT}")
+    return [t["function"]["name"] for t in TOOLS_DEFINITIONS]
+
 
 
 # =============================================================================
@@ -458,6 +520,71 @@ class ToolExecutor:
 
             return "Could not find build issues. Try running build first with: run_command('qmake && make') or run_command('cmake --build .')"
 
+    # ---- web_search ----
+    def web_search(self, query, count=None, need_content=False,
+                   ori_question=None):
+        """🌐 Web pretraga preko DeepSeek /v1/tools/search."""
+        if not WEB_SEARCH_ENABLED:
+            return "❌ Web pretraga je isključena u podešavanjima."
+        if _run_web_tool is None:
+            return "❌ Web alati nisu dostupni (api_tools.py nije učitan)."
+        if not query or not str(query).strip():
+            return "❌ web_search: 'query' je obavezan."
+
+        api_key = self._api_key()
+        if not api_key:
+            return "❌ web_search: API ključ nije postavljen."
+
+        try:
+            cnt = int(count if count is not None else WEB_SEARCH_COUNT)
+        except (TypeError, ValueError):
+            cnt = WEB_SEARCH_COUNT
+        cnt = max(1, min(50, cnt))   # API dozvoljava 1-50
+
+        log(f"🌐 web_search: {str(query)[:120]} (count={cnt})")
+        ok, out = _run_web_tool(
+            "web_search",
+            {"query": query, "count": cnt,
+             "need_content": bool(need_content),
+             "ori_question": ori_question},
+            api_key,
+        )
+        if not ok:
+            log(f"🌐 web_search GREŠKA: {out[:200]}")
+        return out
+
+    # ---- web_fetch ----
+    def web_fetch(self, url):
+        """🌐 Dohvati sadržaj stranice preko DeepSeek /v1/tools/fetch."""
+        if not WEB_FETCH_ENABLED:
+            return "❌ Web fetch je isključen u podešavanjima."
+        if _run_web_tool is None:
+            return "❌ Web alati nisu dostupni (api_tools.py nije učitan)."
+        u = str(url or "").strip()
+        if not u.lower().startswith(("http://", "https://")):
+            return "❌ web_fetch: 'url' mora počinjati sa http:// ili https://"
+
+        api_key = self._api_key()
+        if not api_key:
+            return "❌ web_fetch: API ključ nije postavljen."
+
+        log(f"🌐 web_fetch: {u[:120]}")
+        ok, out = _run_web_tool("web_fetch", {"url": u}, api_key)
+        if not ok:
+            log(f"🌐 web_fetch GREŠKA: {out[:200]}")
+        return out
+
+    def _api_key(self):
+        """API ključ iz parent window-a ili iz fajla."""
+        key = getattr(self.parent, "api_key", None) if self.parent else None
+        if key:
+            return key
+        try:
+            from .utils import load_api_key
+            return load_api_key()
+        except Exception:
+            return ""
+
     # ---- dispatch ----
     def dispatch(self, tool_name, arguments):
         """Prosledjuje poziv odgovarajućoj metodi."""
@@ -470,6 +597,8 @@ class ToolExecutor:
             "read_log": self.read_log,
             "run_command": self.run_command,
             "get_issues": self.get_issues,
+            "web_search": self.web_search,
+            "web_fetch": self.web_fetch,
         }
         func = method_map.get(tool_name)
         if not func:

@@ -91,6 +91,13 @@ DEEPSEEK_COMPLETIONS_URL = "https://api.deepseek.com/completions"
 DEEPSEEK_BETA_COMPLETIONS_URL = "https://api.deepseek.com/beta/completions"
 DEEPSEEK_LIST_MODELS_URL = "https://api.deepseek.com/models"
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
+
+# 🆕 Search & Fetch API (DeepSeek in-house search engine)
+#    POST /v1/tools/search -> {"query": "...", "count": 10}
+#    POST /v1/tools/fetch  -> {"url": "https://..."}
+DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search"
+DEEPSEEK_FETCH_URL = "https://api.deepseek.com/v1/tools/fetch"
+
 DEEPSEEK_MODEL = "deepseek-v4-flash"
 
 # Podržani modeli (iz API docs)
@@ -114,13 +121,12 @@ DEFAULT_SETTINGS = {
     "temperature": 0.3,            # Kreativnost modela (0.0 - 2.0)
     "top_p": 0.9,                  # Top P sampling (0.0 - 1.0)
     "show_thinking": True,          # Prikaži "DeepSeek razmišlja..." pre odgovora
-    # 📬 Gmail – provera nepročitanih email-ova pre slanja
-    "gmail_enabled": False,        # Da li se proverava Gmail pre svake poruke
-    "gmail_user": "",              # Gmail adresa (npr. tvoj.mail@gmail.com)
-    "gmail_app_password": "",      # Google App Password (16 znakova) - NIJE obična lozinka!
-    "gmail_search_query": "",      # Opcioni Gmail search upit (from:, subject:, is:unread...)
+    "reasoning_effort": "auto",    # 🧠 low | high | max | auto (default iz /models)
+    "vision_detail": "auto",       # 👁️ auto | low | high (tokeni po slici)
+    "web_search_enabled": True,    # 🌐 dozvoli web_search alat
+    "web_fetch_enabled": True,     # 🌐 dozvoli web_fetch alat
+    "web_search_count": 10,        # broj rezultata pretrage (1-50)
 }
-
 
 def load_settings():
     """Ucitava settings iz JSON fajla. Ako ne postoji, kreira default."""
@@ -160,6 +166,11 @@ PATTERN_DETECT_LIMIT = _settings["pattern_detect_limit"]
 STREAMING_ENABLED = _settings.get("streaming", True)
 TEMPERATURE = _settings.get("temperature", 0.3)
 TOP_P = _settings.get("top_p", 0.9)
+REASONING_EFFORT = _settings.get("reasoning_effort", "auto")
+VISION_DETAIL = _settings.get("vision_detail", "auto")
+WEB_SEARCH_ENABLED = _settings.get("web_search_enabled", True)
+WEB_FETCH_ENABLED = _settings.get("web_fetch_enabled", True)
+WEB_SEARCH_COUNT = int(_settings.get("web_search_count", 10) or 10)
 
 # History management
 MAX_HISTORY_MESSAGES = 50

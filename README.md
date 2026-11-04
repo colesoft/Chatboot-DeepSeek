@@ -28,13 +28,16 @@
 - 🌐 **Višejezični interfejs** — 🇷🇸 🇬🇧 🇨🇳
 - 📜 **History** — automatsko čuvanje i učitavanje sesija
 - 💰 **Praćenje troškova** — cena po zahtevu i sesiji, špic/van špica (do −50%), cache hit ušteda; klik na indikator otvara **dijalog detalja** (broj zahteva, ukupno, prosek, ušteda po cache)
+- 🖥️ **Bez crne konzole** — konzolni prozor se pri startu automatski skriva; ili pokreni preko `DeepSeek Chatbot.vbs` (potpuno tiho)
 - ⚙️ **Podešavanja** — prilagodi sve parametre kroz UI
 
 ### 🚀 Pokretanje
 ```bash
 pip install PyQt5
-python deepseek_chatbot.py
+python main.py
 ```
+
+Ili dvoklik na **`DeepSeek Chatbot.vbs`** — pokreće se bez ikakvog konzolnog prozora.
 
 ---
 
@@ -54,13 +57,16 @@ python deepseek_chatbot.py
 - 🌐 **Multilingual UI** — 🇷🇸 🇬🇧 🇨🇳
 - 📜 **History** — automatic session saving and loading
 - 💰 **Cost tracking** — per-request & session price, peak/off-peak (up to −50%), cache-hit savings; click the indicator to open a **details dialog** (request count, total, average, cache savings)
+- 🖥️ **No console window** — the console is auto-hidden on startup; or launch via `DeepSeek Chatbot.vbs` (fully silent)
 - ⚙️ **Settings** — customize all parameters via UI
 
 ### 🚀 How to run
 ```bash
 pip install PyQt5
-python deepseek_chatbot.py
+python main.py
 ```
+
+Or double-click **`DeepSeek Chatbot.vbs`** — starts with no console window at all.
 
 ---
 
@@ -80,13 +86,16 @@ python deepseek_chatbot.py
 - 🌐 **多语言界面** — 🇷🇸 🇬🇧 🇨🇳
 - 📜 **历史记录** — 自动保存和加载会话
 - 💰 **成本追踪** — 每次请求和会话费用、高峰/低谷（最高 −50%）、缓存命中节省；点击指示器打开**详情对话框**（请求数、总额、平均值、缓存节省）
+- 🖥️ **无黑色控制台** — 启动时自动隐藏控制台窗口；或使用 `DeepSeek Chatbot.vbs` 启动（完全静默）
 - ⚙️ **设置** — 通过界面自定义所有参数
 
 ### 🚀 运行方式
 ```bash
 pip install PyQt5
-python deepseek_chatbot.py
+python main.py
 ```
+
+或双击 **`DeepSeek Chatbot.vbs`** — 完全没有控制台窗口。
 
 ---
 
@@ -145,6 +154,7 @@ All limits are adjustable in ⚙️ Settings / 所有限制可在 ⚙️ 设置�
 ├── deepseek.ico              # Icon / 图标
 ├── requirements.txt          # Dependencies / 依赖
 ├── run.bat                   # Windows launcher / 启动器
+├── DeepSeek Chatbot.vbs      # Silent launcher (no console) / 静默启动器
 ├── install_deps.bat          # Install dependencies / 安装依赖
 ├── installer_script.iss      # Inno Setup script
 ├── README.md                 # This file / 本文件
@@ -157,6 +167,48 @@ All limits are adjustable in ⚙️ Settings / 所有限制可在 ⚙️ 设置�
 python main.py                # Preporučeno (splash screen + sve)
 python deepseek_chatbot.py    # Isto radi (kompatibilnost sa starom komandom)
 ```
+
+---
+
+## 🖥️ Bez crnog konzolnog prozora / No console window / 无控制台窗口
+
+Na Windows-u `python.exe` je konzolna aplikacija, pa se uz GUI prozor otvara i crni
+prozor sa svojom ikonicom u taskbaru. Rešeno na tri načina:
+
+| Način 🇷🇸 | 🇬🇧 | 🇨🇳 | Konzola |
+|:----------|:----|:----|:--------|
+| Dvoklik na `DeepSeek Chatbot.vbs` | Double-click the `.vbs` | 双击 `.vbs` | ❌ nikad se ne pojavi |
+| `python main.py` | same | 同上 | 🙈 skrije se odmah pri startu |
+| `DeepSeekAssistant.exe` (PyInstaller) | same | 同上 | ❌ `console=False` |
+
+`main.py` poziva `hide_console()` kao **prvu** stvar u `main()` — pre splasha i pre
+bilo kog prozora, tako da nema ni treptaja crnog prozora:
+
+```python
+def hide_console():
+    if not IS_WINDOWS:
+        return
+    if os.environ.get("DEEPSEEK_SHOW_CONSOLE", "") == "1":
+        return
+    import ctypes
+    hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+    if hwnd:
+        ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+```
+
+Konzola se **ne gasi, samo skriva** — `stdout` ostaje živ, pa `print()` i
+`traceback` rade normalno (a sve ide i u `app_log.txt` / `crash_log.txt`).
+
+### 🔧 Debug: vrati konzolu / Get the console back / 恢复控制台
+```bat
+set DEEPSEEK_SHOW_CONSOLE=1
+python main.py
+```
+Windows (cmd): `set DEEPSEEK_SHOW_CONSOLE=1` · PowerShell: `$env:DEEPSEEK_SHOW_CONSOLE=1`
+
+> 💡 `DeepSeek Chatbot.vbs` sam pronalazi Python (`py -3` ili `python`) i postavlja
+> radni direktorijum, pa radi i ako je `run.bat` obrisan. Za prečicu na Desktop:
+> desni klik na fajl → *Send to* → *Desktop (create shortcut)*.
 
 ---
 
