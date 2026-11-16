@@ -12,6 +12,78 @@
 
 ---
 
+## 📥 Instalacija / Install / 安装
+
+> **Windows 10/11** · potreban samo Python 3.8+ (skripta ga sama instalira ako ga nema)
+
+### 1️⃣ Skini projekat / Download the project
+
+**Opcija A — ZIP (najlakše, bez git-a):**
+
+👉 **[⬇️ Download ZIP](https://github.com/colesoft/Chatboot-DeepSeek/archive/refs/heads/main.zip)**
+
+Raspakuj u npr. `C:\DeepSeekAssistant\`
+
+**Opcija B — git clone:**
+```bash
+git clone https://github.com/colesoft/Chatboot-DeepSeek.git
+cd Chatboot-DeepSeek
+```
+
+### 2️⃣ Instaliraj (jedan dvoklik)
+
+Dvoklik na **`INSTALL.bat`** — radi sve sam:
+
+| Korak | Šta radi |
+|:--|:--|
+| 1 | Nađe Python (`py`/`python`/`python3`, i standardne foldere) |
+| 2 | Ako Pythona nema → **ponudi automatsku instalaciju** (winget ili download sa python.org) |
+| 3 | Instalira `PyQt5` + `requests` preko `python -m pip` |
+| 4 | Napravi precicu **“DeepSeek Code Assistant”** na Desktopu |
+| 5 | Pokrene aplikaciju |
+
+> ⚠️ Ako Windows prikaže „Windows protected your PC“ → *More info* → *Run anyway*
+> (skripta je `.bat`, nije potpisan sertifikatom).
+
+### 3️⃣ Pokretanje posle instalacije
+
+- 🖱️ Precica **DeepSeek Code Assistant** na Desktopu, ili
+- 🖱️ dvoklik na **`DeepSeek Chatbot.vbs`** (bez crnog prozora), ili
+- ⌨️ `run.bat` u folderu projekta
+
+### 🔑 Prvi korak u aplikaciji
+
+Otvori ⚙️ **Podešavanja** i unesi svoj **DeepSeek API ključ**
+([platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys)).
+
+### 🗑️ Deinstalacija
+
+Obriši folder + precicu sa Desktopa. Nigde se ništa ne instalira u registry.
+
+<details>
+<summary>🇬🇧 English — Download &amp; Install (click)</summary>
+
+1. **[Download ZIP](https://github.com/colesoft/Chatboot-DeepSeek/archive/refs/heads/main.zip)** and extract, or `git clone https://github.com/colesoft/Chatboot-DeepSeek.git`
+2. Double-click **`INSTALL.bat`** — it finds/installs Python, installs `PyQt5`, creates a Desktop shortcut and launches the app.
+3. Enter your **DeepSeek API key** in ⚙️ Settings ([platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys)).
+4. Afterwards: use the Desktop shortcut, `DeepSeek Chatbot.vbs`, or `run.bat`.
+5. Uninstall: delete the folder + shortcut. Nothing is written to the registry.
+
+</details>
+
+<details>
+<summary>🇨🇳 中文 — 下载与安装（点击展开）</summary>
+
+1. **[下载 ZIP](https://github.com/colesoft/Chatboot-DeepSeek/archive/refs/heads/main.zip)** 并解压，或 `git clone https://github.com/colesoft/Chatboot-DeepSeek.git`
+2. 双击 **`INSTALL.bat`** — 自动查找/安装 Python、安装 `PyQt5`、创建桌面快捷方式并启动程序。
+3. 在 ⚙️ 设置中填入你的 **DeepSeek API 密钥**（[platform.deepseek.com/api_keys](https://platform.deepseek.com/api_keys)）。
+4. 之后可通过桌面快捷方式、`DeepSeek Chatbot.vbs` 或 `run.bat` 启动。
+5. 卸载：删除文件夹和快捷方式即可，不写入注册表。
+
+</details>
+
+---
+
 ## 🇷🇸 Srpski
 
 ### 📖 Opis
@@ -153,6 +225,7 @@ All limits are adjustable in ⚙️ Settings / 所有限制可在 ⚙️ 设置�
 │       └── theme.py         # QSS stilovi / 样式
 ├── deepseek.ico              # Icon / 图标
 ├── requirements.txt          # Dependencies / 依赖
+├── INSTALL.bat               # One-click installer / 一键安装
 ├── run.bat                   # Windows launcher / 启动器
 ├── DeepSeek Chatbot.vbs      # Silent launcher (no console) / 静默启动器
 ├── install_deps.bat          # Install dependencies / 安装依赖
