@@ -15,13 +15,14 @@ set "PYTHON_CMD="
 call :find_python
 if defined PYTHON_CMD goto :have_python
 
-echo   [!] Python nije pronadjen na ovom racunaru.
+echo   Python nije pronadjen na ovom racunaru.
 echo.
 echo       Mogu da ga instaliram automatski.
 echo       Potrebna je internet veza i oko 2 minuta.
 echo.
-choice /c DN /n /m "  Instalirati Python automatski? [D/N] "
-if errorlevel 2 goto :manual_python
+set "ANS="
+set /p "ANS=  Instalirati Python automatski? [D/N] "
+if /i not "!ANS!"=="D" goto :manual_python
 echo.
 
 call :auto_install_python

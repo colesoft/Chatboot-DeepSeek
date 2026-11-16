@@ -12,7 +12,7 @@ echo.
 echo   1/3  Provera i instalacija zavisnosti...
 echo.
 
-call "%~dp0install_deps.bat" < nul
+call "%~dp0install_deps.bat"
 if !ERRORLEVEL! NEQ 0 (
     echo.
     echo   [X] Instalacija zavisnosti nije uspela.
@@ -29,7 +29,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 if exist "%USERPROFILE%\Desktop\DeepSeek Code Assistant.lnk" (
     echo         [OK] Precica napravljena na Desktopu.
 ) else (
-    echo         [!] Precica nije napravljena (nije kriticno).
+    echo         [-] Precica nije napravljena (nije kriticno).
 )
 
 echo.
